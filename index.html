@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="WebGL and Three.js online robot simulation for humanoid, quadruped, and wheeled robot operation."
+    />
+    <title>WebRobot Online Sim</title>
+  </head>
+  <body class="home-active">
+    <div id="app">
+      <div id="stage"></div>
+      <section id="home-screen" aria-label="WebRobot home">
+        <div class="home-shell">
+          <nav class="home-nav" aria-label="Home navigation">
+            <span class="home-brand">WebRobot Online Sim</span>
+            <span class="home-status">Three.js / Cannon-es / Robot</span>
+          </nav>
+          <main class="home-hero">
+            <p class="home-kicker">家庭空间机器人操作仿真</p>
+            <h1>WebRobot Online Sim</h1>
+            <p class="home-copy">通用机器人在线仿真、双臂抓取、真实碰撞和家庭场景操作。</p>
+            <div class="home-actions">
+              <button id="enter-lab" class="home-primary" type="button">进入实验室</button>
+              <button id="enter-objects" type="button">物体台</button>
+            </div>
+          </main>
+          <aside class="home-panel" aria-label="Simulation status">
+            <span>人形 / 四足 / 轮足</span>
+            <strong>1.35 m/s</strong>
+            <span>家庭开阔场景</span>
+          </aside>
+        </div>
+      </section>
+      <div id="hud" aria-label="Robot controls">
+        <header id="topbar">
+          <div class="brand">
+            <span class="brand-mark">WR</span>
+            <div>
+              <strong>WebRobot Online Sim</strong>
+              <span>WebGL / Three.js</span>
+            </div>
+          </div>
+          <div class="top-status">
+            <span id="robot-mode">待命</span>
+            <span id="robot-coord">0.00, 0.00</span>
+            <span id="task-status">无任务</span>
+          </div>
+          <div class="top-actions">
+            <button id="sidebar-toggle" type="button" title="隐藏侧边栏">隐藏侧栏</button>
+            <button id="view-overview" type="button" title="总览视角">总览</button>
+            <button id="view-workbench" type="button" title="客厅视角">客厅</button>
+            <button id="view-objects" type="button" title="物体细节视角">物体</button>
+            <button id="view-follow" type="button" title="跟随机器人">跟随</button>
+            <button id="reset-scene" type="button" title="重置场景">重置</button>
+          </div>
+        </header>
+
+        <aside id="status-panel" class="panel">
+          <div class="panel-title">机器人</div>
+          <dl>
+            <div>
+              <dt>机器人构型</dt>
+              <dd id="robot-variant-name">人形 29DOF 预设</dd>
+            </div>
+            <div>
+              <dt>构型来源</dt>
+              <dd id="robot-profile-name">URDF/MJCF</dd>
+            </div>
+            <div>
+              <dt>模型来源</dt>
+              <dd id="robot-source-name">程序化近似</dd>
+            </div>
+            <div>
+              <dt>选中物体</dt>
+              <dd id="selected-name">未选择</dd>
+            </div>
+            <div>
+              <dt>夹持物体</dt>
+              <dd id="held-name">空</dd>
+            </div>
+            <div>
+              <dt>操作臂</dt>
+              <dd id="active-arm-name">右臂</dd>
+            </div>
+            <div>
+              <dt>腿部姿态</dt>
+              <dd id="leg-pose-name">站立</dd>
+            </div>
+            <div>
+              <dt>放置点</dt>
+              <dd id="target-name">随机</dd>
+            </div>
+            <div>
+              <dt>场景风格</dt>
+              <dd id="scene-style-name">简单</dd>
+            </div>
+          </dl>
+          <div class="meter">
+            <span>左夹爪</span>
+            <div><i id="left-grip-meter"></i></div>
+          </div>
+          <div class="meter">
+            <span>右夹爪</span>
+            <div><i id="right-grip-meter"></i></div>
+          </div>
+          <div class="meter">
+            <span>移动速度</span>
+            <div><i id="speed-meter"></i></div>
+          </div>
+        </aside>
+
+        <aside id="command-panel" class="panel">
+          <div class="panel-title">操作</div>
+          <div class="command-grid">
+            <button id="grab-btn" type="button">抓取</button>
+            <button id="place-btn" type="button">放置</button>
+            <button id="release-btn" type="button">释放</button>
+            <button id="home-btn" type="button">回到中心</button>
+          </div>
+          <div class="panel-subtitle">场景风格</div>
+          <div id="scene-style-buttons" class="segmented" role="group" aria-label="Scene style selector">
+            <button data-scene-mode="simple" type="button">简单</button>
+            <button data-scene-mode="rich" type="button">普通</button>
+            <button data-scene-upgrade="fine" class="locked-option" type="button" title="联系我们开通精细模式">精细</button>
+          </div>
+          <div class="panel-subtitle">机器人构型</div>
+          <div id="robot-variant-buttons" class="segmented" role="group" aria-label="Robot configuration selector">
+            <button data-robot-variant="g1-29dof" type="button">人形 29DOF</button>
+            <button data-robot-variant="g1-23dof" type="button">人形 23DOF</button>
+            <button data-robot-variant="g1-dual-arm" type="button">双臂人形</button>
+            <button data-robot-variant="h1-humanoid" type="button">全尺寸人形</button>
+            <button data-robot-variant="r1-humanoid" type="button">轻量人形</button>
+            <button data-robot-variant="go1-quadruped" type="button">紧凑四足</button>
+            <button data-robot-variant="go2-quadruped" type="button">敏捷四足</button>
+            <button data-robot-variant="aliengo-quadruped" type="button">工业四足</button>
+            <button data-robot-variant="b2-quadruped" type="button">重载四足</button>
+            <button data-robot-variant="b2w-quadruped" type="button">轮足四足</button>
+            <button data-robot-variant="mobile-base" type="button">AMR 底盘</button>
+            <button data-robot-variant="mobile-single-arm" type="button">移动单臂</button>
+            <button data-robot-variant="mobile-dual-arm" type="button">移动双臂</button>
+            <button data-robot-variant="cobot-arm" type="button">协作机械臂</button>
+            <button data-robot-variant="tracked-rescue" type="button">履带巡检</button>
+          </div>
+          <div class="panel-subtitle">操作臂</div>
+          <div id="arm-buttons" class="segmented" role="group" aria-label="Arm selector">
+            <button data-arm-select="left" type="button">左臂</button>
+            <button data-arm-select="right" type="button">右臂</button>
+          </div>
+          <div class="panel-subtitle">左臂</div>
+          <div class="arm-grid" aria-label="Left arm controls">
+            <button data-arm="left" data-arm-action="lift-up" type="button">抬臂</button>
+            <button data-arm="left" data-arm-action="lift-down" type="button">放臂</button>
+            <button data-arm="left" data-arm-action="reach-out" type="button">前伸</button>
+            <button data-arm="left" data-arm-action="reach-in" type="button">收回</button>
+            <button data-arm="left" data-arm-action="grip-close" type="button">合爪</button>
+            <button data-arm="left" data-arm-action="grip-open" type="button">张爪</button>
+          </div>
+          <div class="panel-subtitle">右臂</div>
+          <div class="arm-grid" aria-label="Right arm controls">
+            <button data-arm="right" data-arm-action="lift-up" type="button">抬臂</button>
+            <button data-arm="right" data-arm-action="lift-down" type="button">放臂</button>
+            <button data-arm="right" data-arm-action="reach-out" type="button">前伸</button>
+            <button data-arm="right" data-arm-action="reach-in" type="button">收回</button>
+            <button data-arm="right" data-arm-action="grip-close" type="button">合爪</button>
+            <button data-arm="right" data-arm-action="grip-open" type="button">张爪</button>
+          </div>
+          <div class="panel-subtitle">腿部</div>
+          <div class="leg-grid" aria-label="Leg controls">
+            <button data-leg-action="stand" type="button">站起</button>
+            <button data-leg-action="half-squat" type="button">半蹲</button>
+            <button data-leg-action="deep-squat" type="button">深蹲</button>
+            <button data-leg-action="left-step" type="button">左抬腿</button>
+            <button data-leg-action="right-step" type="button">右抬腿</button>
+            <button data-leg-action="legs-reset" type="button">腿归零</button>
+          </div>
+          <div class="command-grid compact-grid">
+            <button id="arms-reset-btn" type="button">双臂归零</button>
+            <button id="random-target-btn" type="button">随机落点</button>
+            <button id="scatter-items-btn" type="button">随机摆物</button>
+          </div>
+          <div class="panel-subtitle">落点</div>
+          <div id="target-list" class="target-list" aria-label="Placement target list"></div>
+          <div class="panel-subtitle">物体</div>
+          <div id="item-list" class="item-list" aria-label="Object list"></div>
+          <label class="toggle-line">
+            <input id="auto-face" type="checkbox" checked />
+            <span>自动面向目标</span>
+          </label>
+          <label class="range-line">
+            <span>步速 m/s</span>
+            <input id="speed-input" type="range" min="0.65" max="2" step="0.05" value="1.35" />
+          </label>
+        </aside>
+
+        <nav id="controller" aria-label="Movement controls">
+          <button data-hold="turn-left" type="button" title="左转">↶</button>
+          <button data-hold="forward" type="button" title="前进">↑</button>
+          <button data-hold="turn-right" type="button" title="右转">↷</button>
+          <button data-hold="left" type="button" title="左移">←</button>
+          <button data-hold="backward" type="button" title="后退">↓</button>
+          <button data-hold="right" type="button" title="右移">→</button>
+        </nav>
+
+        <div id="toast" class="hidden" role="status"></div>
+      </div>
+      <dialog id="contact-modal" aria-labelledby="contact-modal-title">
+        <div class="modal-body">
+          <h2 id="contact-modal-title">精细模式</h2>
+          <p>精细模式正在内测，包含更高精度模型、材质、光照和定制部署能力。请联系我们开通。</p>
+          <button id="contact-modal-close" type="button">知道了</button>
+        </div>
+      </dialog>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
