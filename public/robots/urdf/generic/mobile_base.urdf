@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<robot name="generic_mobile_base">
+  <material name="white"><color rgba="0.86 0.91 0.88 1"/></material>
+  <material name="black"><color rgba="0.04 0.05 0.05 1"/></material>
+  <material name="glass"><color rgba="0.25 0.8 1.0 0.75"/></material>
+  <link name="base_link">
+    <visual><origin xyz="0 0 0.16"/><geometry><box size="0.62 0.74 0.22"/></geometry><material name="white"/></visual>
+    <collision><origin xyz="0 0 0.16"/><geometry><box size="0.62 0.74 0.22"/></geometry></collision>
+  </link>
+  <link name="payload_deck"><visual><origin xyz="0 0 0.29"/><geometry><box size="0.5 0.56 0.035"/></geometry><material name="black"/></visual></link>
+  <joint name="payload_deck_joint" type="fixed"><parent link="base_link"/><child link="payload_deck"/><origin xyz="0 0 0"/></joint>
+  <link name="sensor_mast"><visual><origin xyz="0 0 0.46"/><geometry><box size="0.1 0.1 0.36"/></geometry><material name="white"/></visual></link>
+  <joint name="sensor_mast_joint" type="fixed"><parent link="base_link"/><child link="sensor_mast"/><origin xyz="0 0.1 0"/></joint>
+  <link name="sensor_head"><visual><origin xyz="0 0 0.72"/><geometry><box size="0.24 0.12 0.12"/></geometry><material name="white"/></visual></link>
+  <joint name="sensor_head_pan_joint" type="revolute"><parent link="sensor_mast"/><child link="sensor_head"/><origin xyz="0 -0.12 0.12"/><axis xyz="0 0 1"/><limit lower="-1.57" upper="1.57" effort="2" velocity="2"/></joint>
+  <link name="lidar"><visual><origin xyz="0 0 0.82"/><geometry><cylinder radius="0.07" length="0.04"/></geometry><material name="glass"/></visual></link>
+  <joint name="lidar_spin_joint" type="continuous"><parent link="sensor_head"/><child link="lidar"/><origin xyz="0 0 0.08"/><axis xyz="0 0 1"/></joint>
+  <link name="front_left_wheel"><visual><origin rpy="1.5708 0 0"/><geometry><cylinder radius="0.09" length="0.07"/></geometry><material name="black"/></visual></link>
+  <joint name="front_left_wheel_joint" type="continuous"><parent link="base_link"/><child link="front_left_wheel"/><origin xyz="-0.34 -0.24 0.08"/><axis xyz="0 1 0"/></joint>
+  <link name="front_right_wheel"><visual><origin rpy="1.5708 0 0"/><geometry><cylinder radius="0.09" length="0.07"/></geometry><material name="black"/></visual></link>
+  <joint name="front_right_wheel_joint" type="continuous"><parent link="base_link"/><child link="front_right_wheel"/><origin xyz="0.34 -0.24 0.08"/><axis xyz="0 1 0"/></joint>
+  <link name="rear_left_wheel"><visual><origin rpy="1.5708 0 0"/><geometry><cylinder radius="0.09" length="0.07"/></geometry><material name="black"/></visual></link>
+  <joint name="rear_left_wheel_joint" type="continuous"><parent link="base_link"/><child link="rear_left_wheel"/><origin xyz="-0.34 0.24 0.08"/><axis xyz="0 1 0"/></joint>
+  <link name="rear_right_wheel"><visual><origin rpy="1.5708 0 0"/><geometry><cylinder radius="0.09" length="0.07"/></geometry><material name="black"/></visual></link>
+  <joint name="rear_right_wheel_joint" type="continuous"><parent link="base_link"/><child link="rear_right_wheel"/><origin xyz="0.34 0.24 0.08"/><axis xyz="0 1 0"/></joint>
+</robot>

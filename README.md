@@ -42,8 +42,9 @@ viewer does not render embedded videos.
 
 ## Highlights
 
-- **Multiple robot platforms**: switchable humanoid, quadruped, wheeled quadruped, AMR base, mobile manipulator, mobile dual-arm, collaborative arm, and tracked inspection procedural profiles.
-- **Explicit model boundary**: current robot platforms are procedural approximations with URDF-style naming; the app does not import URDF/SDF meshes yet.
+- **Multiple robot platforms**: switchable humanoid, quadruped, wheeled quadruped, AMR base, mobile manipulator, mobile dual-arm, collaborative arm, and tracked inspection URDF profiles.
+- **URDF model loading**: Unitree G1, R1, and Go2 load official URDF meshes; generic AMR, mobile-manipulator, cobot, and tracked profiles load local URDF files.
+- **Explicit model boundary**: URDF visuals are the visible robot models, while the simplified internal rig remains only for browser-side collision, navigation, and gripper target calculation.
 - **Dual-arm manipulation**: independent left/right arm lift, lower, reach, retract, gripper close, and gripper open controls.
 - **Physical interaction**: Cannon-es bodies for floor, furniture, robot collision, and dynamic item settling after release.
 - **Obstacle-aware tasks**: grab and place actions use an in-browser occupancy grid and A* path planner derived from the same furniture colliders.
@@ -88,6 +89,7 @@ npm run preview
 | Gripper | Close / Open | Operate the selected arm gripper. |
 | Legs | Stand / Squat / Leg lift | Trigger whole-body pose changes for low manipulation and stepping tests. |
 | Camera | Overview / Living room / Object / Follow | Switch between room, object-detail, and robot-follow views. |
+| Fullscreen | Fullscreen button / `F` | Enter or leave fullscreen simulation mode. |
 
 ## Runtime
 
@@ -96,7 +98,7 @@ flowchart LR
   Entry["Normal WebGL Entry"] --> UI["Operator HUD"]
   UI --> Commands["Robot Commands"]
   Commands --> Planner["Occupancy Grid + A*"]
-  Planner --> Robot["Procedural Robot Rig"]
+  Planner --> Robot["URDF Robot Model"]
   Robot --> Three["Three.js Scene Graph"]
   Physics["Cannon-es Physics World"] --> Three
   Objects["Grabbable Objects"] --> Physics
@@ -141,37 +143,38 @@ Normal mode uses local assets and CC0 material/model sources:
 
 ## Robot Platforms
 
-The selectable robot platforms are not loaded from URDF/SDF files today. They
-are procedural Three.js rigs with link names, proportions, and labels designed
-as generic presets. Some dimensions are grounded in public robot references, but
-the app is not scoped to one vendor.
+Selectable robot platforms are loaded through `urdf-loader` into the Three.js
+scene. The procedural rig remains only as an invisible control and collision
+skeleton for browser-side physics, gripper positions, and navigation.
 
 | Platform | Current source | Manipulation |
 | --- | --- | --- |
-| Humanoid 29DOF Preset | Procedural humanoid approximation, 1320 mm class | Dual-arm controls enabled |
-| Humanoid 23DOF Preset | Procedural fixed-waist humanoid approximation, 1320 mm class | Dual-arm controls enabled |
-| Dual-arm Humanoid Preset | Procedural dual-arm operation approximation | Dual-arm controls enabled |
-| Full-size Humanoid Preset | Procedural full-size humanoid approximation, 1805 mm class | Dual-arm controls enabled |
-| Lightweight Humanoid Preset | Procedural lightweight humanoid approximation, 1230 mm class | Dual-arm controls enabled |
-| Compact Quadruped Preset | Procedural compact quadruped approximation, 645 x 280 x 400 mm class | Locomotion only |
-| Agile Quadruped Preset | Procedural quadruped approximation, 700 x 310 x 400 mm class | Locomotion only |
-| Industrial Quadruped Preset | Procedural industrial quadruped approximation, 650 x 310 x 600 mm class | Locomotion only |
-| Heavy Quadruped Preset | Procedural heavy quadruped approximation, 1098 x 450 x 645 mm class | Locomotion only |
-| Wheeled Quadruped Preset | Procedural wheeled-quadruped approximation, 1098 x 550 x 758 mm class | Wheel-leg locomotion only |
-| Autonomous Mobile Base Preset | Procedural AMR base with mecanum wheels, lidar, bumpers, and payload deck | Navigation only |
-| Mobile Manipulator Preset | Procedural AMR plus single 6DOF arm and gripper | Single-arm controls enabled |
-| Mobile Dual-arm Preset | Procedural omnidirectional base with dual arm mounts | Dual-arm controls enabled |
-| Collaborative Arm Preset | Procedural fixed/station arm with sensor head and workcell base | Single-arm controls enabled |
-| Tracked Inspection Preset | Procedural low-profile tracked inspection base | Navigation only |
+| Humanoid 29DOF Preset | Unitree G1 official `g1_29dof.urdf` + STL meshes | Dual-arm controls enabled |
+| Humanoid 23DOF Preset | Unitree G1 official `g1_23dof.urdf` + STL meshes | Dual-arm controls enabled |
+| Dual-arm Humanoid Preset | Unitree G1 official `g1_29dof.urdf` + STL meshes | Dual-arm controls enabled |
+| Full-size Humanoid Preset | Unitree G1 official URDF scaled for full-size layout | Dual-arm controls enabled |
+| Lightweight Humanoid Preset | Unitree R1 official `R1.urdf` + STL meshes | Dual-arm controls enabled |
+| Compact Quadruped Preset | Unitree Go2 official URDF scaled down | Locomotion only |
+| Agile Quadruped Preset | Unitree Go2 official URDF + DAE meshes | Locomotion only |
+| Industrial Quadruped Preset | Unitree Go2 official URDF scaled for inspection profile | Locomotion only |
+| Heavy Quadruped Preset | Unitree Go2 official URDF scaled for heavy profile | Locomotion only |
+| Wheeled Quadruped Preset | Unitree Go2 official URDF with wheel-leg interaction mapping | Wheel-leg locomotion only |
+| Autonomous Mobile Base Preset | Local generic AMR `mobile_base.urdf` | Navigation only |
+| Mobile Manipulator Preset | Local generic `mobile_manipulator.urdf` | Single-arm controls enabled |
+| Mobile Dual-arm Preset | Local generic `mobile_dual_arm.urdf` | Dual-arm controls enabled |
+| Collaborative Arm Preset | Local generic `cobot_arm.urdf` | Single-arm controls enabled |
+| Tracked Inspection Preset | Local generic `tracked_inspection.urdf` | Navigation only |
 
 When a quadruped platform is selected, arm and gripper controls are disabled in
 the UI so the capability boundary is clear.
 
 ## Robot References
 
-The current presets are generic. These public resources are used as model-format
-and dimension references while broader URDF/SDF/MJCF import remains a future
-integration target.
+The current browser scene imports URDF directly. Official Unitree description
+packages are vendored selectively under `public/robots/urdf/unitree/`; locally
+authored generic URDFs cover AMR, mobile-manipulator, cobot, and tracked
+inspection platforms. The vendored Unitree license is kept at
+`public/robots/urdf/unitree/LICENSE.unitree_ros`.
 
 - [ROS 2 URDF documentation](https://docs.ros.org/en/humble/Tutorials/Intermediate/URDF/URDF-Main.html)
 - [SDFormat specification](https://sdformat.org/spec/)
@@ -186,8 +189,8 @@ integration target.
 - [Unitree R1 product page](https://www.unitree.com/mobile/R1/)
 - [Unitree official open-source page](https://www.unitree.com/cn/opensource/)
 
-Official CAD/URDF import, full-body IK, and robot-grade SLAM remain future
-integration points.
+Full-body IK, higher-fidelity per-platform meshes for every non-Unitree generic
+profile, and robot-grade SLAM remain future integration points.
 
 ## Navigation References
 

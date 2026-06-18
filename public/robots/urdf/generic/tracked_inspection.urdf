@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<robot name="generic_tracked_inspection">
+  <material name="white"><color rgba="0.84 0.9 0.87 1"/></material>
+  <material name="black"><color rgba="0.03 0.04 0.04 1"/></material>
+  <link name="base_link">
+    <visual><origin xyz="0 0 0.15"/><geometry><box size="0.72 0.92 0.2"/></geometry><material name="white"/></visual>
+    <collision><origin xyz="0 0 0.15"/><geometry><box size="0.72 0.92 0.2"/></geometry></collision>
+  </link>
+  <link name="left_track"><visual><origin xyz="-0.42 0 0.09"/><geometry><box size="0.12 0.86 0.16"/></geometry><material name="black"/></visual></link>
+  <joint name="left_track_joint" type="fixed"><parent link="base_link"/><child link="left_track"/></joint>
+  <link name="right_track"><visual><origin xyz="0.42 0 0.09"/><geometry><box size="0.12 0.86 0.16"/></geometry><material name="black"/></visual></link>
+  <joint name="right_track_joint" type="fixed"><parent link="base_link"/><child link="right_track"/></joint>
+  <link name="sensor_mast"><visual><origin xyz="0 -0.04 0.42"/><geometry><box size="0.12 0.12 0.38"/></geometry><material name="white"/></visual></link>
+  <joint name="sensor_mast_joint" type="fixed"><parent link="base_link"/><child link="sensor_mast"/></joint>
+  <link name="sensor_head"><visual><origin xyz="0 0 0"/><geometry><box size="0.24 0.12 0.1"/></geometry><material name="white"/></visual></link>
+  <joint name="sensor_head_pan_joint" type="revolute"><parent link="sensor_mast"/><child link="sensor_head"/><origin xyz="0 -0.12 0.63"/><axis xyz="0 0 1"/><limit lower="-1.57" upper="1.57" effort="2" velocity="2"/></joint>
+</robot>

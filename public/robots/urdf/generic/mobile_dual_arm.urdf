@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<robot name="generic_mobile_dual_arm">
+  <material name="white"><color rgba="0.86 0.91 0.88 1"/></material>
+  <material name="black"><color rgba="0.04 0.05 0.05 1"/></material>
+  <link name="base_link"><visual><origin xyz="0 0 0.17"/><geometry><box size="0.76 0.88 0.26"/></geometry><material name="white"/></visual></link>
+  <link name="mast"><visual><origin xyz="0 0.1 0.62"/><geometry><box size="0.14 0.14 0.72"/></geometry><material name="white"/></visual></link>
+  <joint name="mast_joint" type="fixed"><parent link="base_link"/><child link="mast"/></joint>
+  <link name="sensor_head"><visual><origin xyz="0 0 0"/><geometry><box size="0.25 0.13 0.13"/></geometry><material name="white"/></visual></link>
+  <joint name="sensor_head_pan_joint" type="revolute"><parent link="mast"/><child link="sensor_head"/><origin xyz="0 -0.12 1.0"/><axis xyz="0 0 1"/><limit lower="-1.57" upper="1.57" effort="2" velocity="2"/></joint>
+  <link name="left_upper_arm"><visual><origin xyz="0 0 0.18"/><geometry><cylinder radius="0.045" length="0.36"/></geometry><material name="white"/></visual></link>
+  <joint name="left_shoulder_pitch_joint" type="revolute"><parent link="mast"/><child link="left_upper_arm"/><origin xyz="-0.24 -0.15 0.82"/><axis xyz="1 0 0"/><limit lower="-2.6" upper="2.6" effort="8" velocity="3"/></joint>
+  <link name="left_forearm"><visual><origin xyz="0 0 0.16"/><geometry><cylinder radius="0.04" length="0.32"/></geometry><material name="white"/></visual></link>
+  <joint name="left_elbow_joint" type="revolute"><parent link="left_upper_arm"/><child link="left_forearm"/><origin xyz="0 0 0.34"/><axis xyz="1 0 0"/><limit lower="-2.4" upper="0.2" effort="8" velocity="3"/></joint>
+  <link name="left_wrist"><visual><origin xyz="0 0 0.05"/><geometry><box size="0.12 0.08 0.08"/></geometry><material name="black"/></visual></link>
+  <joint name="left_wrist_pitch_joint" type="revolute"><parent link="left_forearm"/><child link="left_wrist"/><origin xyz="0 0 0.28"/><axis xyz="1 0 0"/><limit lower="-1.2" upper="1.2" effort="4" velocity="3"/></joint>
+  <link name="right_upper_arm"><visual><origin xyz="0 0 0.18"/><geometry><cylinder radius="0.045" length="0.36"/></geometry><material name="white"/></visual></link>
+  <joint name="right_shoulder_pitch_joint" type="revolute"><parent link="mast"/><child link="right_upper_arm"/><origin xyz="0.24 -0.15 0.82"/><axis xyz="1 0 0"/><limit lower="-2.6" upper="2.6" effort="8" velocity="3"/></joint>
+  <link name="right_forearm"><visual><origin xyz="0 0 0.16"/><geometry><cylinder radius="0.04" length="0.32"/></geometry><material name="white"/></visual></link>
+  <joint name="right_elbow_joint" type="revolute"><parent link="right_upper_arm"/><child link="right_forearm"/><origin xyz="0 0 0.34"/><axis xyz="1 0 0"/><limit lower="-2.4" upper="0.2" effort="8" velocity="3"/></joint>
+  <link name="right_wrist"><visual><origin xyz="0 0 0.05"/><geometry><box size="0.12 0.08 0.08"/></geometry><material name="black"/></visual></link>
+  <joint name="right_wrist_pitch_joint" type="revolute"><parent link="right_forearm"/><child link="right_wrist"/><origin xyz="0 0 0.28"/><axis xyz="1 0 0"/><limit lower="-1.2" upper="1.2" effort="4" velocity="3"/></joint>
+</robot>

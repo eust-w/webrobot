@@ -3,19 +3,16 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
-import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
-import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
+import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
+import { getLanguage, LANGUAGE_OPTIONS, setLanguage, t } from "./i18n.js";
 import "./style.css";
 
 const stage = document.getElementById("stage");
+const RENDER_PIXEL_RATIO = Math.min(window.devicePixelRatio || 1, 1.25);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setPixelRatio(RENDER_PIXEL_RATIO);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -31,11 +28,11 @@ function assetUrl(path) {
 
 const textureLoader = new THREE.TextureLoader();
 const gltfLoader = new GLTFLoader();
-const rgbeLoader = new RGBELoader();
+const hdrLoader = new HDRLoader();
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 const roomEnvironment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
 let glasshouseEnvironment = null;
-rgbeLoader.load(assetUrl("hdris/polyhaven/glasshouse_interior/glasshouse_interior_1k.hdr"), (texture) => {
+hdrLoader.load(assetUrl("hdris/polyhaven/glasshouse_interior/glasshouse_interior_1k.hdr"), (texture) => {
   glasshouseEnvironment = pmremGenerator.fromEquirectangular(texture).texture;
   texture.dispose();
   stage.dataset.hdriReady = "true";
@@ -61,20 +58,6 @@ controls.target.set(0, 0.78, 0);
 controls.maxPolarAngle = Math.PI * 0.49;
 controls.minDistance = 2.4;
 controls.maxDistance = 18;
-
-const composer = new EffectComposer(renderer);
-const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
-ssaoPass.kernelRadius = 16;
-ssaoPass.minDistance = 0.004;
-ssaoPass.maxDistance = 0.16;
-ssaoPass.output = SSAOPass.OUTPUT.Default;
-ssaoPass.enabled = false;
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.055, 0.16, 1.18);
-bloomPass.enabled = false;
-composer.addPass(new RenderPass(scene, camera));
-composer.addPass(ssaoPass);
-composer.addPass(bloomPass);
-composer.addPass(new OutputPass());
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -178,23 +161,43 @@ const SPEED_CONFIG = {
   taskMultiplier: 1.06,
   sceneScale: 1.85,
   nominalStepLength: 0.46,
-  turnRate: 2.25
+  turnStepRadius: 0.16,
+  turnRate: 2.25,
+  humanoidVisualGaitRatio: 0.42,
+  humanoidSideStepRatio: 0
+};
+const AUTO_FACE_CONFIG = {
+  turnRate: 0.8,
+  minFrameStep: 0.006,
+  maxFrameStep: 0.026,
+  settleAngle: 0.025
+};
+const HUMANOID_SQUAT_CONFIG = {
+  hipPitch: -0.5,
+  kneePitch: 0.74,
+  anklePitch: -0.32,
+  rootDrop: 0.16
 };
 const NAV_CONFIG = {
   minX: -9.35,
   maxX: 9.35,
   minZ: -6.35,
   maxZ: 6.35,
-  cellSize: 0.35,
-  clearance: 0.48,
-  waypointReach: 0.28
+  cellSize: 0.3,
+  clearance: 0.58,
+  obstacleMargin: 0.2,
+  waypointReach: 0.34,
+  turnSlowdownAngle: 0.78,
+  turnStopAngle: 1.18
 };
-const ROBOT_MODEL_SOURCE = "程序化近似 / 未导入 URDF";
+const ROBOT_MODEL_SOURCE = "URDF 导入模型";
+const SHOW_PROCEDURAL_ROBOT_FALLBACK = false;
+const ROBOT_FORWARD_YAW_OFFSET = -Math.PI / 2;
 const ROBOT_VARIANTS = {
   "g1-29dof": {
     id: "g1-29dof",
     name: "Humanoid 29DOF Preset",
-    profile: "通用人形 29DOF 程序化近似 / 1320mm 级",
+    profile: "Unitree G1 29DOF URDF / 1320mm 级",
     badge: "H29",
     kind: "humanoid",
     armCapable: true,
@@ -327,7 +330,7 @@ const ROBOT_VARIANTS = {
   "go2-quadruped": {
     id: "go2-quadruped",
     name: "Agile Quadruped Preset",
-    profile: "通用敏捷四足程序化近似 / 700x310x400mm 级",
+    profile: "Unitree Go2 URDF / 700x310x400mm 级",
     badge: "AQ",
     kind: "quadruped",
     armCapable: false,
@@ -551,6 +554,129 @@ const ROBOT_VARIANTS = {
     lens: 0x89dfff
   }
 };
+const ROBOT_URDF_PACKAGES = {
+  g1_description: assetUrl("robots/urdf/unitree/g1_description"),
+  r1_description: assetUrl("robots/urdf/unitree/r1_description"),
+  go2_description: assetUrl("robots/urdf/unitree/go2_description")
+};
+let urdfLoaderPromise = null;
+
+function getUrdfLoader() {
+  if (!urdfLoaderPromise) {
+    urdfLoaderPromise = import("urdf-loader").then(({ default: URDFLoader }) => {
+      const loader = new URDFLoader();
+      loader.packages = ROBOT_URDF_PACKAGES;
+      return loader;
+    });
+  }
+  return urdfLoaderPromise;
+}
+
+function disposeObject3D(root) {
+  root.traverse((node) => {
+    if (node.geometry) node.geometry.dispose();
+    const materials = Array.isArray(node.material) ? node.material : node.material ? [node.material] : [];
+    for (const material of materials) {
+      for (const value of Object.values(material)) {
+        if (value?.isTexture) value.dispose();
+      }
+      material.dispose?.();
+    }
+  });
+}
+
+const ROBOT_URDF_ASSETS = {
+  "g1-29dof": {
+    path: "robots/urdf/unitree/g1_description/g1_29dof.urdf",
+    source: "Unitree G1 官方 URDF / g1_29dof",
+    scale: 1,
+    kind: "humanoid"
+  },
+  "g1-23dof": {
+    path: "robots/urdf/unitree/g1_description/g1_23dof.urdf",
+    source: "Unitree G1 官方 URDF / g1_23dof",
+    scale: 1,
+    kind: "humanoid"
+  },
+  "g1-dual-arm": {
+    path: "robots/urdf/unitree/g1_description/g1_29dof.urdf",
+    source: "Unitree G1 官方 URDF / g1_29dof 双臂",
+    scale: 1.02,
+    kind: "humanoid"
+  },
+  "h1-humanoid": {
+    path: "robots/urdf/unitree/g1_description/g1_29dof.urdf",
+    source: "Unitree G1 官方 URDF / 全尺寸缩放显示",
+    scale: 1.18,
+    kind: "humanoid"
+  },
+  "r1-humanoid": {
+    path: "robots/urdf/unitree/r1_description/R1.urdf",
+    source: "Unitree R1 官方 URDF",
+    scale: 1,
+    kind: "humanoid"
+  },
+  "go1-quadruped": {
+    path: "robots/urdf/unitree/go2_description/go2_description.urdf",
+    source: "Unitree Go2 官方 URDF / 紧凑缩放",
+    scale: 0.9,
+    kind: "quadruped"
+  },
+  "go2-quadruped": {
+    path: "robots/urdf/unitree/go2_description/go2_description.urdf",
+    source: "Unitree Go2 官方 URDF",
+    scale: 1,
+    kind: "quadruped"
+  },
+  "aliengo-quadruped": {
+    path: "robots/urdf/unitree/go2_description/go2_description.urdf",
+    source: "Unitree Go2 官方 URDF / 工业缩放",
+    scale: 1.08,
+    kind: "quadruped"
+  },
+  "b2-quadruped": {
+    path: "robots/urdf/unitree/go2_description/go2_description.urdf",
+    source: "Unitree Go2 官方 URDF / 重载缩放",
+    scale: 1.2,
+    kind: "quadruped"
+  },
+  "b2w-quadruped": {
+    path: "robots/urdf/unitree/go2_description/go2_description.urdf",
+    source: "Unitree Go2 官方 URDF / 轮足交互映射",
+    scale: 1.22,
+    kind: "quadruped"
+  },
+  "mobile-base": {
+    path: "robots/urdf/generic/mobile_base.urdf",
+    source: "Generic AMR URDF / 本仓库",
+    scale: 1,
+    kind: "mobile"
+  },
+  "mobile-single-arm": {
+    path: "robots/urdf/generic/mobile_manipulator.urdf",
+    source: "Generic mobile manipulator URDF / 本仓库",
+    scale: 1,
+    kind: "mobile"
+  },
+  "mobile-dual-arm": {
+    path: "robots/urdf/generic/mobile_dual_arm.urdf",
+    source: "Generic dual-arm mobile URDF / 本仓库",
+    scale: 1,
+    kind: "mobile"
+  },
+  "cobot-arm": {
+    path: "robots/urdf/generic/cobot_arm.urdf",
+    source: "Generic collaborative arm URDF / 本仓库",
+    scale: 1,
+    kind: "mobile"
+  },
+  "tracked-rescue": {
+    path: "robots/urdf/generic/tracked_inspection.urdf",
+    source: "Generic tracked inspection URDF / 本仓库",
+    scale: 1,
+    kind: "mobile"
+  }
+};
 const ROBOT_BODY_HALF_HEIGHT = 0.72;
 const ROBOT_FOOT_VISUAL_OFFSET = 0.18;
 const ROBOT_FOOT_LOCAL_Y = -0.325;
@@ -565,7 +691,21 @@ const ROBOT_VISUAL_GROUND_LAYERS = [
   { name: "target-marker", type: "dynamic-target", inner: 0.31, outer: 0.48, y: 0.063 }
 ];
 const robotFootBounds = new THREE.Box3();
+const robotUrdfVisualBounds = new THREE.Box3();
+const ROBOT_URDF_CONTACT_LINK_PATTERNS = {
+  humanoid: [/foot/i, /ankle_roll_link/i, /ankle_pitch_link/i],
+  quadruped: [/foot/i],
+  mobile: [/wheel/i, /track/i, /^base_link$/i]
+};
+const UI_FRAME_UPDATE_INTERVAL_MS = 120;
 let robotSurfaceLift = 0;
+let lastFrameUiUpdate = 0;
+const robotMotionTracker = {
+  initialized: false,
+  x: 0,
+  z: 0,
+  yaw: 0
+};
 
 function createRichTextures() {
   return {
@@ -940,7 +1080,7 @@ function applySceneMode(mode, announce = false) {
   state.sceneMode = mode;
   const rich = mode === "rich";
 
-  renderer.shadowMap.type = rich ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.toneMapping = rich ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
   renderer.toneMappingExposure = rich ? 0.78 : 1;
   scene.background.set(rich ? 0xdfe6df : 0xf1f3ee);
@@ -952,8 +1092,6 @@ function applySceneMode(mode, announce = false) {
   lights.windowGlow.intensity = rich ? 2.85 : 3.1;
   lights.lamp.visible = rich;
   lights.lamp.intensity = rich ? 1.55 : 0;
-  ssaoPass.enabled = rich;
-  bloomPass.enabled = rich;
   document.body.classList.toggle("rich-scene", rich);
 
   setMaterialSurface(mat.floor, pbrTextures.floor, rich ? 0xf2eadc : 0xdedfd7, rich ? 0.52 : 0.78, { normalScale: 0.72 });
@@ -974,7 +1112,7 @@ function applySceneMode(mode, announce = false) {
   applyItemRenderMode(rich);
 
   updateUi();
-  if (announce) toast(rich ? "已切换到普通场景。" : "已切换到简单场景。");
+  if (announce) toast(rich ? t("toast.sceneRich") : t("toast.sceneSimple"));
 }
 
 function setMaterialSurface(material, textureSet, color, roughness, options = {}) {
@@ -1048,6 +1186,8 @@ function applyItemRenderMode(rich) {
     item.material.opacity = hiddenVisualProxy ? 0.035 : 1;
     item.material.depthWrite = !hiddenVisualProxy;
     item.mesh.castShadow = !hiddenVisualProxy;
+    item.mesh.visible = !hiddenVisualProxy;
+    if (item.contactShadow) item.contactShadow.visible = rich && !hiddenVisualProxy;
     item.material.needsUpdate = true;
   }
 }
@@ -1055,16 +1195,22 @@ function applyItemRenderMode(rich) {
 const state = {
   selected: null,
   task: null,
+  language: getLanguage(),
   activeArm: "right",
   sceneMode: "simple",
   robotVariant: "g1-29dof",
   sidebarHidden: false,
+  fullscreen: false,
+  fullscreenFallback: false,
   held: { left: null, right: null },
   follow: false,
   walk: 0,
   gaitSpeed: 0,
+  gaitCommandSpeed: 0,
+  gaitActualSpeed: 0,
   moveSpeed: SPEED_CONFIG.default,
   autoFace: true,
+  pendingFaceTarget: null,
   lastTarget: null,
   currentTarget: null,
   selectedDropSpot: null,
@@ -1098,6 +1244,14 @@ const clickableMeshes = [];
 const items = [];
 const dropSpots = [];
 const navObstacles = [];
+const DROP_SPOT_KEYS = {
+  "茶几": "drop.coffeeTable",
+  "边桌": "drop.sideTable",
+  "电视柜": "drop.tvConsole",
+  "书架中层": "drop.bookshelf",
+  "餐岛台": "drop.kitchenIsland",
+  "地毯": "drop.rug"
+};
 const physics = {
   world: null,
   robotBody: null,
@@ -1110,6 +1264,47 @@ initPhysics();
 initLights();
 let world;
 let robot;
+
+function itemLabel(itemOrId) {
+  const id = typeof itemOrId === "string" ? itemOrId : itemOrId?.id;
+  return t(`item.${id}`);
+}
+
+function dropSpotLabel(spotOrName) {
+  const name = typeof spotOrName === "string" ? spotOrName : spotOrName?.name;
+  return t(DROP_SPOT_KEYS[name] || name);
+}
+
+function targetLabel(targetOrName) {
+  const name = typeof targetOrName === "string" ? targetOrName : targetOrName?.name;
+  return dropSpotLabel(name);
+}
+
+function robotVariantLabel(variantOrId) {
+  const id = typeof variantOrId === "string" ? variantOrId : variantOrId?.id;
+  return t(`robot.${id}.name`);
+}
+
+function robotProfileLabel(variantOrId) {
+  const id = typeof variantOrId === "string" ? variantOrId : variantOrId?.id;
+  return t(`profile.${id}`);
+}
+
+function robotSourceLabel(variantOrId) {
+  const id = typeof variantOrId === "string" ? variantOrId : variantOrId?.id;
+  return t(`source.${id}`);
+}
+
+function urdfStatusLabel(status) {
+  const statusKeys = {
+    "URDF 待加载": "urdf.pending",
+    "URDF 加载中": "urdf.loading",
+    "URDF 已加载": "urdf.loaded",
+    "URDF 加载失败": "urdf.failed",
+    "URDF 进入后加载": "urdf.deferred"
+  };
+  return t(statusKeys[status] || status);
+}
 
 function initPhysics() {
   physics.material = new CANNON.Material("home-contact");
@@ -1135,7 +1330,7 @@ function initLights() {
   const sun = new THREE.DirectionalLight(0xffffff, 2.15);
   sun.position.set(5.4, 8.2, 4.6);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.camera.near = 0.5;
   sun.shadow.camera.far = 28;
   sun.shadow.camera.left = -11;
@@ -1154,7 +1349,7 @@ function initLights() {
   const lamp = new THREE.PointLight(0xffc88e, 1.6, 7, 1.9);
   lamp.position.set(-6.8, 1.55, -2.05);
   lamp.castShadow = true;
-  lamp.shadow.mapSize.set(512, 512);
+  lamp.shadow.mapSize.set(256, 256);
   lamp.visible = false;
   lights.lamp = lamp;
   scene.add(lamp);
@@ -1594,7 +1789,7 @@ function addItem(config) {
   );
   group.add(registerSimpleOnly(edge));
 
-  const label = makeLabel(config.name);
+  const label = makeLabel(itemLabel(config.id));
   label.position.set(0, Math.max(config.size.y * 0.72 + 0.18, config.size.y / 2 + 0.32), 0);
   group.add(label);
 
@@ -1603,6 +1798,7 @@ function addItem(config) {
     group,
     mesh,
     richDetails,
+    contactShadow,
     label: label.element,
     material,
     richColor: richItemColor(config),
@@ -2404,6 +2600,14 @@ class Robot {
     this.group.rotation.y = Math.PI;
     this.parts = {};
     this.variant = ROBOT_VARIANTS[state.robotVariant];
+    this.urdfRequestId = 0;
+    this.urdfStatus = "URDF 待加载";
+    this.urdfSource = ROBOT_MODEL_SOURCE;
+    this.urdfVariantId = null;
+    this.urdfAssetPath = null;
+    this.urdfLoadingAssetPath = null;
+    this.urdfPendingVariant = null;
+    this.urdfModelCache = new Map();
     this.phase = 0;
     this.pose = "idle";
     this.build();
@@ -2480,6 +2684,10 @@ class Robot {
     root.add(this.parts.quadruped.group);
     this.parts.mobile = this.createMobilePlatform();
     root.add(this.parts.mobile.group);
+
+    this.parts.urdfMount = new THREE.Group();
+    this.parts.urdfMount.name = "active_urdf_robot_model";
+    root.add(this.parts.urdfMount);
   }
 
   createArm(side) {
@@ -2866,6 +3074,66 @@ class Robot {
     deck.position.set(0, 0.33, 0.03);
     group.add(deck);
 
+    const shellPanels = [];
+    for (const side of [-1, 1]) {
+      const sidePanel = makeRobotPanel(new THREE.Vector3(0.018, 0.13, 0.48), side > 0 ? "mobile_right_side_service_panel" : "mobile_left_side_service_panel");
+      sidePanel.position.set(0.35 * side, 0.23, 0);
+      shellPanels.push(sidePanel);
+      group.add(sidePanel);
+
+      for (const z of [-0.24, 0, 0.24]) {
+        const vent = new THREE.Mesh(softBoxGeometry(new THREE.Vector3(0.012, 0.026, 0.072), 0.18, 2), richMat.robotRubber);
+        vent.name = side > 0 ? "mobile_right_cooling_louver" : "mobile_left_cooling_louver";
+        vent.position.set(0.365 * side, 0.245, z);
+        vent.castShadow = true;
+        shellPanels.push(vent);
+        group.add(registerRichOnly(vent));
+      }
+
+      const deckRail = new THREE.Group();
+      deckRail.name = side > 0 ? "mobile_right_payload_rail" : "mobile_left_payload_rail";
+      deckRail.position.set(0.24 * side, 0.365, 0.03);
+      for (const z of [-0.22, 0.22]) {
+        const standoff = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.075, 12), richMat.robotScrew);
+        standoff.name = "mobile_payload_rail_standoff";
+        standoff.position.set(0, 0, z);
+        standoff.castShadow = true;
+        deckRail.add(standoff);
+      }
+      const rail = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.48, 12), richMat.robotScrew);
+      rail.name = "mobile_payload_longitudinal_rail";
+      rail.rotation.x = Math.PI / 2;
+      rail.castShadow = true;
+      deckRail.add(rail);
+      shellPanels.push(deckRail);
+      group.add(registerRichOnly(deckRail));
+    }
+
+    const bodyBadge = new THREE.Mesh(softBoxGeometry(new THREE.Vector3(0.16, 0.006, 0.055), 0.18, 3), richMat.bookCoverPbr.clone());
+    bodyBadge.name = "mobile_platform_badge";
+    bodyBadge.position.set(0, 0.29, -0.463);
+    bodyBadge.rotation.x = -0.04;
+    bodyBadge.material.map = createTextTexture("AMR");
+    bodyBadge.material.needsUpdate = true;
+    shellPanels.push(bodyBadge);
+    group.add(registerRichOnly(bodyBadge));
+
+    const emergencyStop = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.036, 0.022, 24), new THREE.MeshStandardMaterial({ color: 0xd2392f, roughness: 0.32, metalness: 0.08 }));
+    emergencyStop.name = "mobile_emergency_stop";
+    emergencyStop.position.set(-0.18, 0.37, -0.22);
+    emergencyStop.castShadow = true;
+    group.add(registerRichOnly(emergencyStop));
+
+    const dockContacts = [];
+    for (const x of [-0.08, 0.08]) {
+      const contact = new THREE.Mesh(softBoxGeometry(new THREE.Vector3(0.055, 0.035, 0.011), 0.24, 3), richMat.brass);
+      contact.name = "mobile_charging_contact";
+      contact.position.set(x, 0.18, 0.462);
+      contact.castShadow = true;
+      dockContacts.push(contact);
+      group.add(registerRichOnly(contact));
+    }
+
     const mast = new THREE.Mesh(softBoxGeometry(new THREE.Vector3(0.12, 0.58, 0.14), 0.18, 4), mat.robotWhite);
     mast.name = "mobile_sensor_mast";
     mast.position.set(0, 0.62, 0.12);
@@ -2913,6 +3181,7 @@ class Robot {
     }
 
     const wheels = [];
+    const wheelRollers = [];
     for (const side of [-1, 1]) {
       for (const end of [-1, 1]) {
         const wheel = new THREE.Group();
@@ -2926,6 +3195,19 @@ class Robot {
         hub.name = "mobile_wheel_hub";
         hub.rotation.z = Math.PI / 2;
         hub.castShadow = true;
+        const rollers = [];
+        for (let i = 0; i < 8; i += 1) {
+          const angle = (i / 8) * Math.PI * 2;
+          const roller = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.052, 10), richMat.robotScrew);
+          roller.name = "mobile_mecanum_roller";
+          roller.rotation.set(Math.PI / 2, angle, side * end * 0.62);
+          roller.position.set(0, Math.sin(angle) * 0.057, Math.cos(angle) * 0.057);
+          roller.castShadow = true;
+          rollers.push(roller);
+          wheelRollers.push(roller);
+          wheel.add(roller);
+        }
+        wheel.userData.rollers = rollers;
         wheel.add(tire, hub);
         wheels.push(wheel);
         group.add(registerRichOnly(wheel));
@@ -2933,6 +3215,7 @@ class Robot {
     }
 
     const tracks = [];
+    const trackRollers = [];
     for (const side of [-1, 1]) {
       const track = new THREE.Group();
       track.name = side > 0 ? "right_track_module" : "left_track_module";
@@ -2941,6 +3224,15 @@ class Robot {
       belt.name = "mobile_track_belt";
       belt.castShadow = true;
       track.add(belt);
+      for (const z of [-0.28, 0.28]) {
+        const sprocket = new THREE.Mesh(new THREE.CylinderGeometry(0.068, 0.068, 0.122, 28), richMat.robotScrew);
+        sprocket.name = side > 0 ? "right_track_sprocket" : "left_track_sprocket";
+        sprocket.rotation.z = Math.PI / 2;
+        sprocket.position.set(0, 0.012, z);
+        sprocket.castShadow = true;
+        trackRollers.push(sprocket);
+        track.add(sprocket);
+      }
       for (const z of [-0.28, -0.14, 0, 0.14, 0.28]) {
         const lug = new THREE.Mesh(softBoxGeometry(new THREE.Vector3(0.118, 0.028, 0.045), 0.18, 2), richMat.robotScrew);
         lug.position.set(0, 0.075, z);
@@ -2957,7 +3249,343 @@ class Robot {
     caster.scale.set(1.2, 0.45, 1.2);
     group.add(registerRichOnly(caster));
 
-    return { group, base, deck, mast, neck, head, screen, lensBar, lidar, statusLeds, wheels, tracks, caster, bumperFront, bumperRear };
+    return {
+      group,
+      base,
+      deck,
+      mast,
+      neck,
+      head,
+      screen,
+      lensBar,
+      lidar,
+      statusLeds,
+      wheels,
+      wheelRollers,
+      tracks,
+      trackRollers,
+      caster,
+      bumperFront,
+      bumperRear,
+      shellPanels,
+      bodyBadge,
+      emergencyStop,
+      dockContacts
+    };
+  }
+
+  robotUrdfAsset(variant = this.variant) {
+    return ROBOT_URDF_ASSETS[variant.id] || ROBOT_URDF_ASSETS["g1-29dof"];
+  }
+
+  showProceduralRig() {
+    if (!SHOW_PROCEDURAL_ROBOT_FALLBACK) {
+      this.hideProceduralRig();
+      return;
+    }
+    this.setRobotKind(this.variant.kind);
+  }
+
+  hideProceduralRig() {
+    for (const key of [
+      "pelvis",
+      "waist",
+      "torso",
+      "chest",
+      "neck",
+      "head",
+      "visor",
+      "richDetails"
+    ]) {
+      if (this.parts[key]) this.parts[key].visible = false;
+    }
+    this.parts.leftArm.shoulder.visible = false;
+    this.parts.rightArm.shoulder.visible = false;
+    this.parts.leftLeg.hip.visible = false;
+    this.parts.rightLeg.hip.visible = false;
+    this.parts.quadruped.group.visible = false;
+    this.parts.mobile.group.visible = false;
+  }
+
+  loadUrdfVariant(variant) {
+    const asset = this.robotUrdfAsset(variant);
+    if (this.parts.urdfModel && this.urdfAssetPath === asset.path) {
+      const requestId = ++this.urdfRequestId;
+      this.activateUrdfModel(this.parts.urdfModel, variant, asset, requestId);
+      return;
+    }
+    const cachedModel = this.urdfModelCache.get(asset.path);
+    if (cachedModel) {
+      const requestId = ++this.urdfRequestId;
+      this.cacheActiveUrdfModel();
+      this.parts.urdfMount.add(cachedModel);
+      this.activateUrdfModel(cachedModel, variant, asset, requestId);
+      return;
+    }
+    if (this.urdfStatus === "URDF 加载中" && this.urdfLoadingAssetPath === asset.path) {
+      this.urdfPendingVariant = variant;
+      this.urdfSource = asset.source;
+      return;
+    }
+    const requestId = ++this.urdfRequestId;
+    this.urdfStatus = "URDF 加载中";
+    this.urdfSource = asset.source;
+    this.urdfLoadingAssetPath = asset.path;
+    this.urdfPendingVariant = variant;
+    this.hideProceduralRig();
+    const stage = document.getElementById("stage");
+    if (stage) {
+      stage.dataset.robotSource = asset.source;
+      stage.dataset.robotUrdfStatus = this.urdfStatus;
+      stage.dataset.robotUrdfPath = asset.path;
+      stage.dataset.robotUrdfJointCount = "0";
+    }
+
+    getUrdfLoader()
+      .then((loader) => {
+        if (requestId !== this.urdfRequestId) return;
+        loader.load(
+          assetUrl(asset.path),
+          (urdfRobot) => {
+            if (requestId !== this.urdfRequestId) {
+              disposeObject3D(urdfRobot);
+              return;
+            }
+            const activeVariant = this.urdfPendingVariant || variant;
+            const activeAsset = this.robotUrdfAsset(activeVariant);
+            urdfRobot.traverse((node) => {
+              node.castShadow = true;
+              node.receiveShadow = true;
+              if (node.isMesh && node.material) {
+                if (Array.isArray(node.material)) {
+                  for (const material of node.material) material.needsUpdate = true;
+                } else {
+                  node.material.needsUpdate = true;
+                }
+              }
+            });
+            this.cacheActiveUrdfModel();
+            this.parts.urdfMount.add(urdfRobot);
+            this.activateUrdfModel(urdfRobot, activeVariant, activeAsset, requestId);
+          },
+          undefined,
+          (error) => this.handleUrdfLoadError(requestId, asset, error)
+        );
+      })
+      .catch((error) => this.handleUrdfLoadError(requestId, asset, error));
+  }
+
+  cacheActiveUrdfModel() {
+    if (this.parts.urdfModel && this.urdfAssetPath) {
+      this.urdfModelCache.set(this.urdfAssetPath, this.parts.urdfModel);
+      this.parts.urdfMount.remove(this.parts.urdfModel);
+    } else {
+      this.parts.urdfMount.clear();
+    }
+    this.parts.urdfModel = null;
+    this.urdfVariantId = null;
+    this.urdfAssetPath = null;
+  }
+
+  activateUrdfModel(urdfRobot, variant, asset, requestId = this.urdfRequestId) {
+    if (requestId !== this.urdfRequestId) return;
+    urdfRobot.name = `${variant.id}_urdf_model`;
+    urdfRobot.rotation.x = -Math.PI / 2;
+    urdfRobot.scale.setScalar(asset.scale || 1);
+    urdfRobot.position.set(0, 0, 0);
+    this.parts.urdfModel = urdfRobot;
+    this.urdfVariantId = variant.id;
+    this.urdfAssetPath = asset.path;
+    this.urdfModelCache.delete(asset.path);
+    this.urdfLoadingAssetPath = null;
+    this.urdfPendingVariant = null;
+    this.urdfStatus = "URDF 已加载";
+    this.urdfSource = asset.source;
+    this.alignUrdfToControlRig(urdfRobot);
+    urdfRobot.userData.contactObjects = collectUrdfContactObjects(urdfRobot, variant);
+    this.hideProceduralRig();
+    this.syncUrdfPose(0, performance.now() * 0.001);
+    const stage = document.getElementById("stage");
+    if (stage) {
+      stage.dataset.robotSource = asset.source;
+      stage.dataset.robotUrdfStatus = this.urdfStatus;
+      stage.dataset.robotUrdfPath = asset.path;
+      stage.dataset.robotUrdfJointCount = String(Object.keys(urdfRobot.joints || {}).length);
+    }
+    updateUi();
+  }
+
+  handleUrdfLoadError(requestId, asset, error) {
+    if (requestId !== this.urdfRequestId) return;
+    this.urdfStatus = "URDF 加载失败";
+    this.urdfLoadingAssetPath = null;
+    this.urdfPendingVariant = null;
+    this.urdfSource = `${asset.source} / 加载失败`;
+    console.error("URDF load failed", asset.path, error);
+    const stage = document.getElementById("stage");
+    if (stage) {
+      stage.dataset.robotSource = this.urdfSource;
+      stage.dataset.robotUrdfStatus = this.urdfStatus;
+      stage.dataset.robotUrdfPath = asset.path;
+      stage.dataset.robotUrdfJointCount = "0";
+    }
+    if (!this.parts.urdfModel) this.showProceduralRig();
+    updateUi();
+  }
+
+  alignUrdfToControlRig(urdfRobot) {
+    this.group.updateWorldMatrix(true, true);
+    const controlState = robotFootGroundState();
+    if (!controlState) return;
+    robotUrdfVisualBounds.setFromObject(urdfRobot);
+    if (robotUrdfVisualBounds.isEmpty()) return;
+    urdfRobot.position.y += controlState.lowestFootY - robotUrdfVisualBounds.min.y;
+    urdfRobot.userData.stanceBaseY = urdfRobot.position.y;
+    urdfRobot.updateWorldMatrix(true, true);
+  }
+
+  deferUrdfVariant(variant) {
+    const asset = this.robotUrdfAsset(variant);
+    this.urdfRequestId += 1;
+    this.urdfVariantId = null;
+    this.urdfAssetPath = null;
+    this.urdfLoadingAssetPath = null;
+    this.urdfPendingVariant = null;
+    this.urdfStatus = "URDF 进入后加载";
+    this.urdfSource = asset.source;
+    disposeObject3D(this.parts.urdfMount);
+    this.parts.urdfMount.clear();
+    this.parts.urdfModel = null;
+    this.hideProceduralRig();
+    const stage = document.getElementById("stage");
+    if (stage) {
+      stage.dataset.robotSource = asset.source;
+      stage.dataset.robotUrdfStatus = this.urdfStatus;
+      stage.dataset.robotUrdfPath = asset.path;
+      stage.dataset.robotUrdfJointCount = "0";
+    }
+  }
+
+  ensureUrdfLoaded() {
+    if (this.parts.urdfModel && this.urdfVariantId === this.variant.id) return;
+    if (this.urdfStatus === "URDF 加载中") return;
+    this.loadUrdfVariant(this.variant);
+  }
+
+  setUrdfJoint(name, value) {
+    const model = this.parts.urdfModel;
+    if (!model?.joints?.[name]) return;
+    model.setJointValue(name, value);
+  }
+
+  syncUrdfPose(walkSwing, time) {
+    const model = this.parts.urdfModel;
+    if (!model) return;
+    if (this.variant.kind === "quadruped") {
+      this.syncQuadrupedUrdfPose();
+    } else if (this.variant.kind === "humanoid") {
+      this.syncHumanoidUrdfPose(walkSwing, time);
+    } else {
+      this.syncMobileUrdfPose(time);
+    }
+  }
+
+  syncHumanoidUrdfPose(walkSwing, time) {
+    const crouch = state.legs.crouch;
+    const leftLift = state.legs.leftLift;
+    const rightLift = state.legs.rightLift;
+    const armPose = {
+      left: this.armPose("left", this.pose, walkSwing * 0.12, time),
+      right: this.armPose("right", this.pose, -walkSwing * 0.12, time)
+    };
+    const leftHip = walkSwing * 0.42 + crouch * HUMANOID_SQUAT_CONFIG.hipPitch - leftLift * 0.58;
+    const rightHip = -walkSwing * 0.42 + crouch * HUMANOID_SQUAT_CONFIG.hipPitch - rightLift * 0.58;
+    const leftKnee = Math.max(0, -walkSwing) * 0.38 + crouch * HUMANOID_SQUAT_CONFIG.kneePitch + leftLift * 0.82;
+    const rightKnee = Math.max(0, walkSwing) * 0.38 + crouch * HUMANOID_SQUAT_CONFIG.kneePitch + rightLift * 0.82;
+
+    this.setUrdfJoint("left_hip_pitch_joint", leftHip);
+    this.setUrdfJoint("right_hip_pitch_joint", rightHip);
+    this.setUrdfJoint("left_knee_joint", leftKnee);
+    this.setUrdfJoint("right_knee_joint", rightKnee);
+    this.setUrdfJoint("left_ankle_pitch_joint", crouch * HUMANOID_SQUAT_CONFIG.anklePitch + leftLift * 0.24);
+    this.setUrdfJoint("right_ankle_pitch_joint", crouch * HUMANOID_SQUAT_CONFIG.anklePitch + rightLift * 0.24);
+    this.setUrdfJoint("waist_yaw_joint", Math.sin(time * 0.8) * 0.03);
+    this.setUrdfJoint("waist_roll_joint", -walkSwing * 0.04);
+    this.setUrdfJoint("head_joint", Math.sin(time * 0.7) * 0.08);
+    this.setUrdfJoint("head_yaw_joint", Math.sin(time * 0.7) * 0.08);
+
+    for (const sideName of ["left", "right"]) {
+      if (!robotArmEnabled(sideName)) continue;
+      const side = sideName === "left" ? -1 : 1;
+      const pose = armPose[sideName];
+      this.setUrdfJoint(`${sideName}_shoulder_pitch_joint`, pose.sx * 0.82 - 0.16);
+      this.setUrdfJoint(`${sideName}_shoulder_roll_joint`, side * (0.18 + pose.sz * 0.9));
+      this.setUrdfJoint(`${sideName}_shoulder_yaw_joint`, -side * pose.sz * 0.72);
+      this.setUrdfJoint(`${sideName}_elbow_joint`, -0.32 - pose.fx * 0.75);
+      this.setUrdfJoint(`${sideName}_wrist_roll_joint`, side * 0.08);
+      this.setUrdfJoint(`${sideName}_wrist_pitch_joint`, -pose.fx * 0.2);
+      this.setUrdfJoint(`${sideName}_wrist_yaw_joint`, side * pose.grip * 0.18);
+    }
+    this.lockHumanoidUrdfFeet(crouch);
+  }
+
+  lockHumanoidUrdfFeet(crouch) {
+    const model = this.parts.urdfModel;
+    if (!model) return;
+    const baseY = Number.isFinite(model.userData.stanceBaseY) ? model.userData.stanceBaseY : model.position.y;
+    model.userData.stanceBaseY = baseY;
+    model.position.y = baseY - crouch * HUMANOID_SQUAT_CONFIG.rootDrop;
+    model.updateWorldMatrix(true, true);
+
+    let lowestClearance = Infinity;
+    let targetClearance = ROBOT_FOOT_GROUND_CLEARANCE;
+    const contactObjects = model.userData.contactObjects || [model];
+    for (const object of contactObjects) {
+      robotUrdfVisualBounds.setFromObject(object);
+      if (robotUrdfVisualBounds.isEmpty()) continue;
+      const ground = visualGroundForFootBounds(robotUrdfVisualBounds);
+      const target = ground.y > 0 ? ROBOT_FOOT_DECOR_CLEARANCE : ROBOT_FOOT_GROUND_CLEARANCE;
+      const clearance = robotUrdfVisualBounds.min.y - ground.y;
+      if (clearance < lowestClearance) {
+        lowestClearance = clearance;
+        targetClearance = target;
+      }
+    }
+    if (!Number.isFinite(lowestClearance)) return;
+    model.position.y += targetClearance - lowestClearance;
+    model.updateWorldMatrix(true, true);
+  }
+
+  syncQuadrupedUrdfPose() {
+    const crouch = state.legs.crouch;
+    for (const [prefix, side, end] of [
+      ["FL", -1, -1],
+      ["FR", 1, -1],
+      ["RL", -1, 1],
+      ["RR", 1, 1]
+    ]) {
+      const diagonalPhase = (side * end > 0 ? 0 : Math.PI) + this.phase;
+      const gait = Math.sin(diagonalPhase) * state.walk;
+      const lift = Math.max(0, Math.sin(diagonalPhase)) * state.walk;
+      this.setUrdfJoint(`${prefix}_hip_joint`, side * 0.08 + crouch * side * 0.05);
+      this.setUrdfJoint(`${prefix}_thigh_joint`, gait * 0.34 + crouch * 0.22);
+      this.setUrdfJoint(`${prefix}_calf_joint`, Math.max(0, -gait) * 0.55 + crouch * 0.54 + lift * 0.26);
+    }
+  }
+
+  syncMobileUrdfPose(time) {
+    const sweep = Math.sin(time * 0.7) * 0.08;
+    this.setUrdfJoint("sensor_head_pan_joint", sweep);
+    this.setUrdfJoint("lidar_spin_joint", time * 0.8);
+    for (const sideName of ["left", "right"]) {
+      if (!robotArmEnabled(sideName)) continue;
+      const side = sideName === "left" ? -1 : 1;
+      const pose = this.armPose(sideName, this.pose, 0, time);
+      this.setUrdfJoint(`${sideName}_shoulder_pitch_joint`, pose.sx * 0.82 - 0.16);
+      this.setUrdfJoint(`${sideName}_shoulder_roll_joint`, side * (0.18 + pose.sz * 0.72));
+      this.setUrdfJoint(`${sideName}_elbow_joint`, -0.32 - pose.fx * 0.72);
+      this.setUrdfJoint(`${sideName}_wrist_pitch_joint`, -pose.fx * 0.22);
+    }
   }
 
   setVariant(id) {
@@ -2976,6 +3604,7 @@ class Robot {
     this.setRobotKind(variant.kind);
     this.applyQuadrupedVariant(variant);
     this.applyMobileVariant(variant);
+    this.hideProceduralRig();
 
     const h = variant.heightScale;
     this.parts.pelvis.position.y = 0.68 * h;
@@ -3011,12 +3640,16 @@ class Robot {
     this.parts.chest.material.needsUpdate = true;
     oldMap?.dispose?.();
 
+    this.hideProceduralRig();
+    if (state.home.entered || state.home.entering) this.loadUrdfVariant(variant);
+    else this.deferUrdfVariant(variant);
+
     const stage = document.getElementById("stage");
     if (stage) {
       stage.dataset.robotVariant = variant.id;
       stage.dataset.robotProfile = variant.profile;
       stage.dataset.robotKind = variant.kind;
-      stage.dataset.robotSource = ROBOT_MODEL_SOURCE;
+      stage.dataset.robotSource = this.urdfSource;
       stage.dataset.robotHasLidar = String(!!variant.hasLidar);
       stage.dataset.robotWheelRadius = String(variant.wheelRadius || 0);
       stage.dataset.robotArmCapable = String(!!variant.armCapable);
@@ -3045,6 +3678,7 @@ class Robot {
     this.parts.rightArm.shoulder.visible = !quadruped && (!mobile || armLayout === "right" || armLayout === "dual");
     this.parts.leftLeg.hip.visible = !quadruped && !mobile;
     this.parts.rightLeg.hip.visible = !quadruped && !mobile;
+    if (this.parts.urdfModel) this.hideProceduralRig();
   }
 
   applyQuadrupedVariant(variant) {
@@ -3123,6 +3757,38 @@ class Robot {
     mobile.bumperRear.scale.set(widthScale, 1, 1);
     mobile.bumperFront.position.set(0, height * 0.78, -length * 0.55);
     mobile.bumperRear.position.set(0, height * 0.78, length * 0.55);
+    if (mobile.bodyBadge) {
+      mobile.bodyBadge.position.set(0, height + 0.08, -length * 0.565);
+      mobile.bodyBadge.scale.set(variant.mobileStyle === "station" ? 0.72 : 1, 1, 1);
+      const oldMap = mobile.bodyBadge.material.map;
+      mobile.bodyBadge.material.map = createTextTexture(variant.badge || "BOT");
+      mobile.bodyBadge.material.needsUpdate = true;
+      oldMap?.dispose?.();
+    }
+    if (mobile.emergencyStop) {
+      mobile.emergencyStop.position.set(-width * 0.24, deckY + 0.05, -length * 0.28);
+      setRichSuppressed(mobile.emergencyStop, !(variant.armCapable || variant.mobileStyle !== "tracked"));
+    }
+    for (const contact of mobile.dockContacts || []) {
+      const x = contact.position.x < 0 ? -1 : 1;
+      contact.position.set(width * 0.11 * x, height * 0.78, length * 0.56);
+    }
+    for (const detail of mobile.shellPanels || []) {
+      if (detail.name.includes("side")) {
+        const side = detail.position.x < 0 ? -1 : 1;
+        detail.position.set((width * 0.5 + 0.02) * side, height * 0.98, 0);
+        detail.scale.set(1, height / 0.22, length / 0.82);
+      } else if (detail.name.includes("louver")) {
+        const side = detail.position.x < 0 ? -1 : 1;
+        detail.position.x = (width * 0.5 + 0.035) * side;
+        detail.position.y = height + 0.02;
+      } else if (detail.name.includes("rail")) {
+        const side = detail.position.x < 0 ? -1 : 1;
+        detail.position.set(width * 0.36 * side, deckY + 0.06, 0.03);
+        detail.scale.z = length / 0.82;
+        setRichSuppressed(detail, variant.mobileStyle === "tracked");
+      }
+    }
 
     mobile.mast.scale.set(widthScale * 0.86, mastHeight / 0.58, 1);
     mobile.mast.position.set(0, deckY + mastHeight * 0.5, 0.12);
@@ -3145,6 +3811,9 @@ class Robot {
       wheel.position.set((width * 0.52) * side, height * 0.55, (length * 0.38) * end);
       wheel.scale.setScalar(variant.mobileStyle === "omni" ? 1.08 : 1);
       setRichSuppressed(wheel, !wheelVisible);
+      for (const roller of wheel.userData.rollers || []) {
+        roller.visible = variant.mobileStyle === "mecanum" || variant.mobileStyle === "omni";
+      }
     }
 
     const trackVisible = variant.mobileStyle === "tracked";
@@ -3176,8 +3845,6 @@ class Robot {
     this.parts.rightArm.shoulder.scale.setScalar(scale);
     this.parts.leftArm.shoulder.rotation.set(0.48, -0.12, -0.16);
     this.parts.rightArm.shoulder.rotation.set(0.48, 0.12, 0.16);
-    this.parts.leftArm.shoulder.visible = layout === "dual";
-    this.parts.rightArm.shoulder.visible = layout === "right" || layout === "dual";
   }
 
   update(dt, time) {
@@ -3191,11 +3858,13 @@ class Robot {
 
     if (this.variant.kind === "quadruped") {
       this.applyQuadrupedPose(dt);
+      this.syncUrdfPose(swing, time);
       return;
     }
 
     if (this.variant.kind === "mobile") {
       this.applyMobilePose(swing, dt, time);
+      this.syncUrdfPose(swing, time);
       return;
     }
 
@@ -3205,6 +3874,7 @@ class Robot {
     const armSwing = moving && pose === "idle" ? swing * 0.34 : 0;
     this.applyArm("left", this.armPose("left", pose, armSwing, time), dt);
     this.applyArm("right", this.armPose("right", pose, -armSwing, time), dt);
+    this.syncUrdfPose(swing, time);
   }
 
   applyMobilePose(walkSwing, dt, time) {
@@ -3230,11 +3900,15 @@ class Robot {
     if (robotArmEnabled("right")) this.applyArm("right", this.armPose("right", pose, -armSwing, time), dt);
 
     if (variant.mobileStyle !== "tracked") {
-      for (const wheel of mobile.wheels) wheel.rotation.x += dt * state.walk * 9;
+      for (const wheel of mobile.wheels) {
+        wheel.rotation.x += dt * state.walk * 9;
+        for (const roller of wheel.userData.rollers || []) roller.rotation.y += dt * state.walk * 13;
+      }
     }
     for (const track of mobile.tracks) {
       track.rotation.x = THREE.MathUtils.lerp(track.rotation.x, moving ? walkSwing * 0.02 : 0, k);
     }
+    for (const roller of mobile.trackRollers || []) roller.rotation.x += dt * state.walk * 7;
   }
 
   applyQuadrupedPose(dt) {
@@ -3278,7 +3952,7 @@ class Robot {
     const crouch = state.legs.crouch;
     const leftLift = state.legs.leftLift;
     const rightLift = state.legs.rightLift;
-    const upperDrop = crouch * 0.18;
+    const upperDrop = crouch * HUMANOID_SQUAT_CONFIG.rootDrop;
     const k = 1 - Math.exp(-dt * 10);
 
     this.parts.pelvis.position.y = THREE.MathUtils.lerp(this.parts.pelvis.position.y, 0.68 * h - upperDrop, k);
@@ -3299,16 +3973,16 @@ class Robot {
     this.parts.leftLeg.hip.position.set(-hipX, 0.62 * h, 0);
     this.parts.rightLeg.hip.position.set(hipX, 0.62 * h, 0);
 
-    const leftHipTarget = walkSwing * 0.42 + crouch * 0.42 - leftLift * 0.58;
-    const rightHipTarget = -walkSwing * 0.42 + crouch * 0.42 - rightLift * 0.58;
-    const leftShinTarget = Math.max(0, -walkSwing) * 0.38 + crouch * 0.88 + leftLift * 0.82;
-    const rightShinTarget = Math.max(0, walkSwing) * 0.38 + crouch * 0.88 + rightLift * 0.82;
+    const leftHipTarget = walkSwing * 0.42 + crouch * HUMANOID_SQUAT_CONFIG.hipPitch - leftLift * 0.58;
+    const rightHipTarget = -walkSwing * 0.42 + crouch * HUMANOID_SQUAT_CONFIG.hipPitch - rightLift * 0.58;
+    const leftShinTarget = Math.max(0, -walkSwing) * 0.38 + crouch * HUMANOID_SQUAT_CONFIG.kneePitch + leftLift * 0.82;
+    const rightShinTarget = Math.max(0, walkSwing) * 0.38 + crouch * HUMANOID_SQUAT_CONFIG.kneePitch + rightLift * 0.82;
     this.parts.leftLeg.hip.rotation.x = THREE.MathUtils.lerp(this.parts.leftLeg.hip.rotation.x, leftHipTarget, k);
     this.parts.rightLeg.hip.rotation.x = THREE.MathUtils.lerp(this.parts.rightLeg.hip.rotation.x, rightHipTarget, k);
     this.parts.leftLeg.shin.rotation.x = THREE.MathUtils.lerp(this.parts.leftLeg.shin.rotation.x, leftShinTarget, k);
     this.parts.rightLeg.shin.rotation.x = THREE.MathUtils.lerp(this.parts.rightLeg.shin.rotation.x, rightShinTarget, k);
-    this.parts.leftLeg.foot.rotation.x = THREE.MathUtils.lerp(this.parts.leftLeg.foot.rotation.x, -crouch * 0.24 + leftLift * 0.28, k);
-    this.parts.rightLeg.foot.rotation.x = THREE.MathUtils.lerp(this.parts.rightLeg.foot.rotation.x, -crouch * 0.24 + rightLift * 0.28, k);
+    this.parts.leftLeg.foot.rotation.x = THREE.MathUtils.lerp(this.parts.leftLeg.foot.rotation.x, crouch * HUMANOID_SQUAT_CONFIG.anklePitch + leftLift * 0.28, k);
+    this.parts.rightLeg.foot.rotation.x = THREE.MathUtils.lerp(this.parts.rightLeg.foot.rotation.x, crouch * HUMANOID_SQUAT_CONFIG.anklePitch + rightLift * 0.28, k);
   }
 
   armPose(name, pose, armSwing, time) {
@@ -3388,7 +4062,160 @@ function updateRobotBodyCollision(body = physics.robotBody, variant = ROBOT_VARI
   body.updateMassProperties();
 }
 
+function setElementText(selector, key) {
+  const element = document.querySelector(selector);
+  if (element) element.textContent = t(key);
+}
+
+function setElementTitle(selector, key) {
+  const element = document.querySelector(selector);
+  if (element) element.title = t(key);
+}
+
+function setElementTextAt(selector, index, key) {
+  const element = document.querySelectorAll(selector)[index];
+  if (element) element.textContent = t(key);
+}
+
+function setupLanguageControls() {
+  for (const select of document.querySelectorAll("[data-language-select]")) {
+    if (!select.options.length) {
+      for (const language of LANGUAGE_OPTIONS) {
+        const option = document.createElement("option");
+        option.value = language.code;
+        option.textContent = language.label;
+        select.appendChild(option);
+      }
+    }
+    select.value = state.language;
+    select.addEventListener("change", () => {
+      state.language = setLanguage(select.value);
+      applyTranslations();
+      updateUi();
+    });
+  }
+}
+
+function syncLanguageControls() {
+  for (const select of document.querySelectorAll("[data-language-select]")) {
+    select.value = state.language;
+  }
+}
+
+function applyTranslations() {
+  document.title = t("app.title");
+  setElementText(".home-brand", "home.nav");
+  setElementText(".home-kicker", "home.kicker");
+  setElementText(".home-hero h1", "home.title");
+  setElementText(".home-copy", "home.copy");
+  setElementText("#enter-lab", "home.enterLab");
+  setElementText("#enter-objects", "home.objects");
+  setElementTextAt(".home-panel span", 0, "home.platforms");
+  setElementText(".home-panel strong", "home.speed");
+  setElementTextAt(".home-panel span", 1, "home.scene");
+
+  setElementText(".brand strong", "app.title");
+  setElementText(".brand span", "app.subtitle");
+  setElementText("#view-overview", "top.overview");
+  setElementTitle("#view-overview", "top.overviewTitle");
+  setElementText("#view-workbench", "top.living");
+  setElementTitle("#view-workbench", "top.livingTitle");
+  setElementText("#view-objects", "top.objects");
+  setElementTitle("#view-objects", "top.objectsTitle");
+  setElementText("#view-follow", "top.follow");
+  setElementTitle("#view-follow", "top.followTitle");
+  setElementText("#reset-scene", "top.reset");
+  setElementTitle("#reset-scene", "top.resetTitle");
+
+  for (const label of document.querySelectorAll(".language-control span")) label.textContent = t("language.label");
+  setElementText("#status-panel .panel-title", "panel.robot");
+  setElementText("#command-panel .panel-title", "panel.commands");
+  [
+    "status.robotVariant",
+    "status.profile",
+    "status.modelSource",
+    "status.selected",
+    "status.held",
+    "status.activeArm",
+    "status.legPose",
+    "status.dropTarget",
+    "status.sceneStyle"
+  ].forEach((key, index) => setElementTextAt("#status-panel dt", index, key));
+  ["meter.leftGrip", "meter.rightGrip", "meter.speed"].forEach((key, index) => setElementTextAt("#status-panel .meter span", index, key));
+
+  setElementText("#grab-btn", "command.grab");
+  setElementText("#place-btn", "command.place");
+  setElementText("#release-btn", "command.release");
+  setElementText("#home-btn", "command.home");
+  setElementText("#arms-reset-btn", "command.resetArms");
+  setElementText("#random-target-btn", "command.randomTarget");
+  setElementText("#scatter-items-btn", "command.scatterItems");
+  ["panel.sceneStyle", "panel.robotConfig", "panel.arm", "panel.leftArm", "panel.rightArm", "panel.legs", "panel.targets", "panel.items"]
+    .forEach((key, index) => setElementTextAt("#command-panel .panel-subtitle", index, key));
+
+  document.querySelector("[data-scene-mode='simple']").textContent = t("scene.simple");
+  document.querySelector("[data-scene-mode='rich']").textContent = t("scene.rich");
+  const fineButton = document.querySelector("[data-scene-upgrade='fine']");
+  fineButton.textContent = t("scene.fine");
+  fineButton.title = t("scene.fineTitle");
+
+  for (const btn of document.querySelectorAll("#robot-variant-buttons [data-robot-variant]")) {
+    btn.textContent = robotVariantLabel(btn.dataset.robotVariant).replace(/\sPreset$/i, "");
+  }
+  for (const btn of document.querySelectorAll("[data-arm-select]")) btn.textContent = t(`arm.${btn.dataset.armSelect}`);
+  const armActionKeys = {
+    "lift-up": "arm.liftUp",
+    "lift-down": "arm.liftDown",
+    "reach-out": "arm.reachOut",
+    "reach-in": "arm.reachIn",
+    "grip-close": "arm.gripClose",
+    "grip-open": "arm.gripOpen"
+  };
+  for (const btn of document.querySelectorAll("[data-arm][data-arm-action]")) btn.textContent = t(armActionKeys[btn.dataset.armAction]);
+  const legActionKeys = {
+    stand: "leg.stand",
+    "half-squat": "leg.halfSquat",
+    "deep-squat": "leg.deepSquat",
+    "left-step": "leg.leftStep",
+    "right-step": "leg.rightStep",
+    "legs-reset": "leg.reset"
+  };
+  for (const btn of document.querySelectorAll("[data-leg-action]")) btn.textContent = t(legActionKeys[btn.dataset.legAction]);
+
+  setElementText(".toggle-line span", "toggle.autoFace");
+  setElementText(".range-line span", "range.speed");
+  const holdTitles = {
+    "turn-left": "move.turnLeft",
+    forward: "move.forward",
+    "turn-right": "move.turnRight",
+    left: "move.left",
+    backward: "move.backward",
+    right: "move.right"
+  };
+  for (const btn of document.querySelectorAll("[data-hold]")) btn.title = t(holdTitles[btn.dataset.hold]);
+
+  setElementText("#contact-modal-title", "modal.fineTitle");
+  setElementText("#contact-modal p", "modal.fineCopy");
+  setElementText("#contact-modal-close", "modal.ok");
+
+  for (const item of items) {
+    if (item.label) item.label.textContent = itemLabel(item);
+  }
+  document.querySelectorAll("#item-list button").forEach((btn) => {
+    const item = items.find((candidate) => candidate.id === btn.dataset.item);
+    const nameEl = btn.querySelector(".item-name");
+    if (item && nameEl) nameEl.textContent = itemLabel(item);
+  });
+  document.querySelectorAll("#target-list button").forEach((btn) => {
+    const nameEl = btn.querySelector(".target-name");
+    if (nameEl) nameEl.textContent = dropSpotLabel(btn.dataset.target);
+  });
+  syncLanguageControls();
+}
+
 function bindUi() {
+  setupLanguageControls();
+  applyTranslations();
   bindHomeScreen();
   document.getElementById("grab-btn").addEventListener("click", commandGrab);
   document.getElementById("place-btn").addEventListener("click", commandPlace);
@@ -3396,6 +4223,7 @@ function bindUi() {
   document.getElementById("home-btn").addEventListener("click", () => moveRobotTo(new THREE.Vector3(0, 0, 2.55), Math.PI));
   document.getElementById("reset-scene").addEventListener("click", resetScene);
   document.getElementById("sidebar-toggle").addEventListener("click", () => setSidebarHidden(!state.sidebarHidden));
+  document.getElementById("fullscreen-toggle").addEventListener("click", toggleFullscreen);
   document.getElementById("view-overview").addEventListener("click", () => setView("overview"));
   document.getElementById("view-workbench").addEventListener("click", () => setView("workbench"));
   document.getElementById("view-objects").addEventListener("click", () => setView("objects"));
@@ -3406,6 +4234,7 @@ function bindUi() {
   });
   document.getElementById("auto-face").addEventListener("change", (event) => {
     state.autoFace = event.target.checked;
+    if (!state.autoFace) state.pendingFaceTarget = null;
   });
   document.getElementById("speed-input").addEventListener("input", (event) => {
     state.moveSpeed = THREE.MathUtils.clamp(Number(event.target.value), SPEED_CONFIG.min, SPEED_CONFIG.max);
@@ -3422,13 +4251,13 @@ function bindUi() {
   document.getElementById("contact-modal").addEventListener("click", (event) => {
     if (event.target.id === "contact-modal") closeContactModal();
   });
-  for (const btn of document.querySelectorAll("[data-robot-variant]")) {
+  for (const btn of document.querySelectorAll("#robot-variant-buttons [data-robot-variant]")) {
     btn.addEventListener("click", () => setRobotVariant(btn.dataset.robotVariant));
   }
   document.getElementById("random-target-btn").addEventListener("click", () => {
     const target = pickRandomTarget();
     setTargetMarker(target);
-    toast(`随机落点：${target.name}`);
+    toast(t("toast.randomTarget", { target: targetLabel(target) }));
   });
 
   for (const btn of document.querySelectorAll("[data-arm-select]")) {
@@ -3484,13 +4313,23 @@ function bindUi() {
       else commandGrab();
     }
     if (event.code === "Escape") {
+      if (state.fullscreen) {
+        event.preventDefault();
+        exitFullscreenMode();
+        return;
+      }
       state.task = null;
       clearNavPath();
       robot.pose = "idle";
-      toast("任务已取消。");
+      toast(t("toast.cancelled"));
+    }
+    if (event.code === "KeyF") {
+      event.preventDefault();
+      toggleFullscreen();
     }
   });
   window.addEventListener("keyup", (event) => keys.delete(event.code));
+  document.addEventListener("fullscreenchange", syncFullscreenState);
 
   renderer.domElement.addEventListener("pointerdown", (event) => mouseDown.set(event.clientX, event.clientY));
   renderer.domElement.addEventListener("pointerup", onCanvasPick);
@@ -3519,6 +4358,7 @@ function startExperience(mode = "simple", view = "overview") {
   impulses.clear();
   controls.enabled = false;
   document.body.classList.add("home-entering");
+  robot?.ensureUrdfLoaded();
 }
 
 function updateHomeCamera(dt, time) {
@@ -3535,11 +4375,11 @@ function updateHomeCamera(dt, time) {
   if (!state.home.entering) return;
 
   state.home.elapsed += dt;
-  const t = THREE.MathUtils.clamp(state.home.elapsed / state.home.duration, 0, 1);
-  const eased = t * t * (3 - 2 * t);
+  const progress = THREE.MathUtils.clamp(state.home.elapsed / state.home.duration, 0, 1);
+  const eased = progress * progress * (3 - 2 * progress);
   camera.position.lerpVectors(state.home.fromPosition, state.home.toPosition, eased);
   controls.target.lerpVectors(state.home.fromTarget, state.home.toTarget, eased);
-  if (t < 1) return;
+  if (progress < 1) return;
 
   state.home.entering = false;
   state.home.entered = true;
@@ -3547,7 +4387,7 @@ function updateHomeCamera(dt, time) {
   document.body.classList.add("app-entered");
   controls.enabled = true;
   setView(state.home.view);
-  toast(state.sceneMode === "rich" ? "已进入普通家庭场景。" : "已进入机器人实验室。");
+  toast(state.sceneMode === "rich" ? t("toast.enterRich") : t("toast.enterSimple"));
 }
 
 function openContactModal() {
@@ -3557,7 +4397,7 @@ function openContactModal() {
   } else {
     modal.setAttribute("open", "");
   }
-  toast("精细模式正在内测，请联系我们开通。");
+  toast(t("toast.fineMode"));
 }
 
 function closeContactModal() {
@@ -3575,9 +4415,68 @@ function setSidebarHidden(hidden) {
   updateUi();
 }
 
+async function toggleFullscreen() {
+  if (state.fullscreen) {
+    await exitFullscreenMode();
+  } else {
+    await enterFullscreenMode();
+  }
+}
+
+async function enterFullscreenMode() {
+  state.fullscreenFallback = false;
+  const target = document.getElementById("app") || document.documentElement;
+  try {
+    if (target.requestFullscreen) {
+      await target.requestFullscreen({ navigationUI: "hide" });
+    } else {
+      state.fullscreenFallback = true;
+    }
+  } catch (error) {
+    state.fullscreenFallback = true;
+    console.warn("Fullscreen API unavailable, using immersive fallback", error);
+  }
+  state.fullscreen = true;
+  applyFullscreenState();
+  toast(state.fullscreenFallback ? t("toast.immersive") : t("toast.fullscreen"));
+}
+
+async function exitFullscreenMode() {
+  const hadNativeFullscreen = !!document.fullscreenElement;
+  try {
+    if (hadNativeFullscreen) await document.exitFullscreen();
+  } catch (error) {
+    console.warn("Fullscreen exit failed", error);
+  }
+  state.fullscreenFallback = false;
+  state.fullscreen = false;
+  applyFullscreenState();
+  toast(t("toast.exitFullscreen"));
+}
+
+function syncFullscreenState() {
+  state.fullscreen = !!document.fullscreenElement || state.fullscreenFallback;
+  if (!document.fullscreenElement) state.fullscreenFallback = false;
+  applyFullscreenState();
+}
+
+function applyFullscreenState() {
+  document.body.classList.toggle("fullscreen-active", state.fullscreen);
+  if (stage) {
+    stage.dataset.fullscreen = String(state.fullscreen);
+    stage.dataset.fullscreenFallback = String(state.fullscreenFallback);
+  }
+  updateUi();
+  onResize();
+}
+
 function setRobotVariant(id) {
   if (!robot) return;
   const nextVariant = ROBOT_VARIANTS[id] || ROBOT_VARIANTS["g1-29dof"];
+  if (robot.variant?.id === nextVariant.id && ["URDF 加载中", "URDF 已加载"].includes(robot.urdfStatus)) {
+    updateUi();
+    return;
+  }
   if (nextVariant.armCapable === false && anyHeld()) {
     for (const arm of ["left", "right"]) {
       if (state.held[arm]) releaseArmAtHand(arm);
@@ -3589,16 +4488,16 @@ function setRobotVariant(id) {
   robot.setVariant(id);
   keepRobotFeetAboveFloor();
   updateUi();
-  toast(`${robot.variant.name}：${robot.variant.profile}`);
+  toast(t("toast.robotVariant", { name: robotVariantLabel(robot.variant), profile: robotProfileLabel(robot.variant) }));
 }
 
 function handleArmAction(arm, action) {
   if (!robotCanManipulate()) {
-    toast("当前平台没有可操作夹爪。");
+    toast(t("toast.noGripper"));
     return;
   }
   if (!robotArmEnabled(arm)) {
-    toast("当前平台没有启用该侧机械臂。");
+    toast(t("toast.armUnavailable"));
     return;
   }
   state.activeArm = arm;
@@ -3653,12 +4552,12 @@ function handleLegAction(action) {
   }
   robot.pose = anyHeld() ? "carry" : "idle";
   updateUi();
-  toast(`腿部姿态：${legPoseLabel()}`);
+  toast(t("toast.legPose", { pose: legPoseLabel() }));
 }
 
 function resetArms() {
   if (!robotCanManipulate()) {
-    toast("当前四足平台没有双臂夹爪。");
+    toast(t("toast.noDualArm"));
     return;
   }
   for (const arm of ["left", "right"]) {
@@ -3678,7 +4577,7 @@ function tryManualGrab(arm) {
   if (item) {
     attachItem(item, arm);
     selectItem(item);
-    toast(`${armLabel(arm)}已夹住：${item.name}`);
+    toast(t("toast.manualGrab", { arm: armLabel(arm), item: itemLabel(item) }));
   }
 }
 
@@ -3694,11 +4593,12 @@ function onCanvasPick(event) {
   const item = items.find((candidate) => candidate.id === hits[0].object.userData.itemId);
   if (item) {
     selectItem(item);
-    if (state.autoFace) facePoint(item.group.position, 0.08);
+    if (state.autoFace) queueAutoFace(item.group.position);
   }
 }
 
 function selectItem(item) {
+  if (state.selected === item) return;
   state.selected = item;
   for (const candidate of items) {
     candidate.label.classList.toggle("selected", candidate === item);
@@ -3709,21 +4609,21 @@ function selectItem(item) {
 
 function commandGrab() {
   if (!robotCanManipulate()) {
-    toast("当前平台不支持抓取，请切换到带机械臂的平台。");
+    toast(t("toast.unsupportedGrab"));
     return;
   }
   const arm = state.activeArm;
   if (!robotArmEnabled(arm)) {
-    toast("当前平台没有启用该侧机械臂。");
+    toast(t("toast.armUnavailable"));
     return;
   }
   if (state.held[arm]) {
-    toast(`${armLabel(arm)}已有夹持物。`);
+    toast(t("toast.armOccupied", { arm: armLabel(arm) }));
     return;
   }
   if (!state.selected || state.selected.heldBy) selectItem(nearestFreeItem());
   if (!state.selected) {
-    toast("没有可抓取物体。");
+    toast(t("toast.noGrabbable"));
     return;
   }
   state.task = {
@@ -3737,48 +4637,48 @@ function commandGrab() {
     waypoint: 0,
     pathGoalKey: ""
   };
-  toast(`${armLabel(arm)}抓取：${state.selected.name}`);
+  toast(t("toast.grab", { arm: armLabel(arm), item: itemLabel(state.selected) }));
 }
 
 function commandPlace() {
   if (!robotCanManipulate()) {
-    toast("当前平台不支持放置物体。");
+    toast(t("toast.unsupportedPlace"));
     return;
   }
   const arm = state.activeArm;
   if (!robotArmEnabled(arm)) {
-    toast("当前平台没有启用该侧机械臂。");
+    toast(t("toast.armUnavailable"));
     return;
   }
   if (!state.held[arm]) {
-    toast(`${armLabel(arm)}没有夹持物。`);
+    toast(t("toast.armEmpty", { arm: armLabel(arm) }));
     return;
   }
   const item = state.held[arm];
   const target = state.selectedDropSpot ? targetFromDropSpot(state.selectedDropSpot, item, false) : pickRandomTarget(item);
   setTargetMarker(target);
   state.task = { type: "place", phase: "approach", arm, item, target, t: 0, path: null, waypoint: 0, pathGoalKey: "" };
-  toast(`${armLabel(arm)}放置到：${target.name}`);
+  toast(t("toast.place", { arm: armLabel(arm), target: targetLabel(target) }));
 }
 
 function commandRelease(arm) {
   if (!robotCanManipulate()) {
-    toast("当前平台没有夹爪可释放。");
+    toast(t("toast.noRelease"));
     return;
   }
   if (!robotArmEnabled(arm)) {
-    toast("当前平台没有启用该侧机械臂。");
+    toast(t("toast.armUnavailable"));
     return;
   }
   if (!state.held[arm]) {
-    toast(`${armLabel(arm)}为空。`);
+    toast(t("toast.emptyArm", { arm: armLabel(arm) }));
     return;
   }
   releaseArmAtHand(arm);
   state.task = null;
   clearNavPath();
   robot.pose = anyHeld() ? "carry" : "idle";
-  toast(`${armLabel(arm)}已释放。`);
+  toast(t("toast.released", { arm: armLabel(arm) }));
 }
 
 function nearestFreeItem() {
@@ -3893,11 +4793,11 @@ function updateTask(dt) {
     }
     const target = task.item.group.position.clone();
     const stop = navigateToward(task, task.stand, dt, 0.18);
-    facePoint(target, dt);
     if (task.phase === "approach") {
       robot.pose = "idle";
       state.arms[task.arm].grip = THREE.MathUtils.damp(state.arms[task.arm].grip, 0.02, 8, dt);
       if (stop) {
+        facePoint(target, dt);
         task.phase = "pregrasp";
         task.t = 0;
       }
@@ -3938,7 +4838,7 @@ function updateTask(dt) {
       if (task.t > 0.45) {
         state.task = null;
         clearNavPath(task);
-        toast(`已抓取：${task.item.name}`);
+        toast(t("toast.grabbed", { item: itemLabel(task.item) }));
       }
     }
   }
@@ -3947,9 +4847,9 @@ function updateTask(dt) {
     const stand = task.target.position.clone().add(task.target.standOffset);
     if (task.phase === "approach") {
       const arrived = navigateToward(task, stand, dt, 0.34);
-      facePoint(task.target.position, dt);
       robot.pose = "carry";
       if (arrived) {
+        facePoint(task.target.position, dt);
         task.phase = "lower";
         task.t = 0;
       }
@@ -3971,7 +4871,7 @@ function updateTask(dt) {
       state.task = null;
       clearNavPath(task);
       robot.pose = anyHeld() ? "carry" : "idle";
-      toast(`已放置到${task.target.name}。`);
+      toast(t("toast.placed", { target: targetLabel(task.target) }));
     }
   }
 }
@@ -3986,7 +4886,7 @@ function pickRandomTarget(item = null) {
 function scatterItems() {
   const freeItems = items.filter((item) => !item.heldBy);
   if (!freeItems.length || !dropSpots.length) {
-    toast("没有可随机摆放的物体。");
+    toast(t("toast.noScatter"));
     return;
   }
   const shuffledSpots = [...dropSpots].sort(() => Math.random() - 0.5);
@@ -4004,7 +4904,7 @@ function scatterItems() {
   clearNavPath();
   robot.pose = anyHeld() ? "carry" : "idle";
   updateUi();
-  toast("物体已随机摆放到家庭落点。");
+  toast(t("toast.scatter"));
 }
 
 function randomPointOnDropSpot(base, item) {
@@ -4028,7 +4928,7 @@ function selectDropSpot(name) {
   state.selectedDropSpot = spot;
   const target = targetFromDropSpot(spot, state.held[state.activeArm], false);
   setTargetMarker(target);
-  toast(`已选择落点：${target.name}`);
+  toast(t("toast.targetSelected", { target: targetLabel(target) }));
 }
 
 function targetFromDropSpot(base, item = null, randomize = false) {
@@ -4083,45 +4983,67 @@ function moveToward(dest, dt, arriveDistance = 0.06) {
     return true;
   }
   const dir = to.normalize();
+  const desiredYaw = yawForDirection(dir);
+  robot.group.rotation.y = dampAngle(robot.group.rotation.y, desiredYaw, 10, dt);
+  const yawError = Math.abs(angleDelta(robot.group.rotation.y, desiredYaw));
   const targetSpeed = state.moveSpeed * SPEED_CONFIG.taskMultiplier;
-  setRobotPlanarVelocity(dir.multiplyScalar(sceneVelocityForSpeed(targetSpeed)));
-  updateGait(targetSpeed, dt);
+  const turnScale = THREE.MathUtils.clamp(
+    (NAV_CONFIG.turnStopAngle - yawError) / (NAV_CONFIG.turnStopAngle - NAV_CONFIG.turnSlowdownAngle),
+    0,
+    1
+  );
+  const speedScale = yawError > NAV_CONFIG.turnSlowdownAngle ? turnScale * 0.55 : 1;
+  const moveSpeed = targetSpeed * speedScale;
+  const forward = robotForward();
+  setRobotPlanarVelocity(forward.multiplyScalar(sceneVelocityForSpeed(moveSpeed)));
+  updateGait(yawError > 0.04 ? Math.max(moveSpeed, SPEED_CONFIG.min) : moveSpeed, dt);
   return false;
 }
 
 function navigateToward(task, dest, dt, arriveDistance = 0.08) {
   const planarDest = dest.clone();
   planarDest.y = 0;
+  const reachableDest = nearestFreeNavPoint(clampNavPoint(planarDest));
   const planarRobot = robot.group.position.clone();
   planarRobot.y = 0;
-  if (planarRobot.distanceTo(planarDest) < arriveDistance) {
+  if (planarRobot.distanceTo(reachableDest) < arriveDistance) {
     clearNavPath(task);
     setRobotPlanarVelocity(new THREE.Vector3());
     updateGait(0, dt);
     return true;
   }
 
-  const goalKey = `${planarDest.x.toFixed(2)},${planarDest.z.toFixed(2)}`;
+  const goalKey = `${reachableDest.x.toFixed(2)},${reachableDest.z.toFixed(2)}`;
   if (!task.path || task.pathGoalKey !== goalKey || task.waypoint >= task.path.length) {
-    task.path = planPath(planarRobot, planarDest);
+    task.path = planPath(planarRobot, reachableDest);
     task.pathGoalKey = goalKey;
     task.waypoint = 0;
     updateNavPathVisual(task.path);
   }
 
-  if (!task.path?.length) return moveToward(planarDest, dt, arriveDistance);
-  if (hasLineOfSight(planarRobot, planarDest)) {
-    task.path = [planarDest.clone()];
+  if (!task.path?.length) {
+    setRobotPlanarVelocity(new THREE.Vector3());
+    updateGait(0, dt);
+    updateNavPathVisual([]);
+    return false;
+  }
+  if (hasLineOfSight(planarRobot, reachableDest)) {
+    task.path = [reachableDest.clone()];
     task.waypoint = 0;
     updateNavPathVisual(task.path);
   }
 
-  let waypoint = task.path[task.waypoint] || planarDest;
+  let waypoint = task.path[task.waypoint] || reachableDest;
   while (task.waypoint < task.path.length - 1 && planarRobot.distanceTo(waypoint) < NAV_CONFIG.waypointReach) {
     task.waypoint += 1;
     waypoint = task.path[task.waypoint];
   }
-  if (task.waypoint < task.path.length - 1) facePoint(waypoint, dt);
+  if (!hasLineOfSight(planarRobot, waypoint)) {
+    task.path = planPath(planarRobot, reachableDest);
+    task.waypoint = 0;
+    updateNavPathVisual(task.path);
+    waypoint = task.path[0] || reachableDest;
+  }
   const arrivedAtWaypoint = moveToward(waypoint, dt, task.waypoint === task.path.length - 1 ? arriveDistance : NAV_CONFIG.waypointReach);
   if (arrivedAtWaypoint && task.waypoint < task.path.length - 1) task.waypoint += 1;
   if (arrivedAtWaypoint && task.waypoint >= task.path.length - 1) {
@@ -4179,7 +5101,7 @@ function planPath(start, goal) {
     }
   }
 
-  return [clampedGoal];
+  return [];
 }
 
 function reconstructNavPath(node) {
@@ -4221,7 +5143,8 @@ function hasLineOfSight(from, to) {
   const a = clampNavPoint(from);
   const b = clampNavPoint(to);
   if (!pointInNavBounds(a) || !pointInNavBounds(b)) return false;
-  return !navObstacles.some((obstacle) => segmentIntersectsInflatedBox(a, b, obstacle, NAV_CONFIG.clearance));
+  const clearance = robotNavClearance();
+  return !navObstacles.some((obstacle) => segmentIntersectsInflatedBox(a, b, obstacle, clearance));
 }
 
 function segmentIntersectsInflatedBox(from, to, obstacle, padding) {
@@ -4230,25 +5153,36 @@ function segmentIntersectsInflatedBox(from, to, obstacle, padding) {
   const minZ = obstacle.minZ - padding;
   const maxZ = obstacle.maxZ + padding;
   if (pointInsideBox2(from, minX, maxX, minZ, maxZ) || pointInsideBox2(to, minX, maxX, minZ, maxZ)) return true;
-  return segmentIntersectsSegment2(from, to, minX, minZ, maxX, minZ) ||
-    segmentIntersectsSegment2(from, to, maxX, minZ, maxX, maxZ) ||
-    segmentIntersectsSegment2(from, to, maxX, maxZ, minX, maxZ) ||
-    segmentIntersectsSegment2(from, to, minX, maxZ, minX, minZ);
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  let tMin = 0;
+  let tMax = 1;
+  for (const [origin, direction, min, max] of [
+    [from.x, dx, minX, maxX],
+    [from.z, dz, minZ, maxZ]
+  ]) {
+    if (Math.abs(direction) < 1e-6) {
+      if (origin < min || origin > max) return false;
+      continue;
+    }
+    const t1 = (min - origin) / direction;
+    const t2 = (max - origin) / direction;
+    tMin = Math.max(tMin, Math.min(t1, t2));
+    tMax = Math.min(tMax, Math.max(t1, t2));
+    if (tMin > tMax) return false;
+  }
+  return true;
+}
+
+function robotNavClearance() {
+  const variant = robot?.variant || ROBOT_VARIANTS[state.robotVariant];
+  const halfExtents = variant?.collisionHalfExtents;
+  const robotRadius = halfExtents ? Math.max(halfExtents.x, halfExtents.z) : NAV_CONFIG.clearance;
+  return Math.max(NAV_CONFIG.clearance, robotRadius + NAV_CONFIG.obstacleMargin);
 }
 
 function pointInsideBox2(point, minX, maxX, minZ, maxZ) {
   return point.x >= minX && point.x <= maxX && point.z >= minZ && point.z <= maxZ;
-}
-
-function segmentIntersectsSegment2(a, b, x1, z1, x2, z2) {
-  const c = { x: x1, z: z1 };
-  const d = { x: x2, z: z2 };
-  const orient = (p, q, r) => Math.sign((q.z - p.z) * (r.x - q.x) - (q.x - p.x) * (r.z - q.z));
-  const o1 = orient(a, b, c);
-  const o2 = orient(a, b, d);
-  const o3 = orient(c, d, a);
-  const o4 = orient(c, d, b);
-  return o1 !== o2 && o3 !== o4;
 }
 
 function worldToNavCell(point) {
@@ -4277,11 +5211,12 @@ function navHeuristic(a, b) {
 function isNavCellBlocked(x, z) {
   const point = navCellToWorld({ x, z });
   if (!pointInNavBounds(point)) return true;
+  const clearance = robotNavClearance();
   return navObstacles.some((obstacle) =>
-    point.x >= obstacle.minX - NAV_CONFIG.clearance &&
-    point.x <= obstacle.maxX + NAV_CONFIG.clearance &&
-    point.z >= obstacle.minZ - NAV_CONFIG.clearance &&
-    point.z <= obstacle.maxZ + NAV_CONFIG.clearance
+    point.x >= obstacle.minX - clearance &&
+    point.x <= obstacle.maxX + clearance &&
+    point.z >= obstacle.minZ - clearance &&
+    point.z <= obstacle.maxZ + clearance
   );
 }
 
@@ -4326,10 +5261,13 @@ function updateManual(dt) {
   if (keys.has("KeyA") || keys.has("ArrowLeft") || controlActive("left")) strafeAxis -= 1;
   if (keys.has("KeyD") || keys.has("ArrowRight") || controlActive("right")) strafeAxis += 1;
 
-  const turnLeft = keys.has("KeyQ") || controlActive("turn-left");
-  const turnRight = keys.has("KeyE") || controlActive("turn-right");
+  const humanoid = robot.variant.kind === "humanoid";
+  const lateralTurnAxis = humanoid ? -strafeAxis : 0;
+  const turnLeft = keys.has("KeyQ") || controlActive("turn-left") || lateralTurnAxis > 0;
+  const turnRight = keys.has("KeyE") || controlActive("turn-right") || lateralTurnAxis < 0;
   if (turnLeft) robot.group.rotation.y += dt * SPEED_CONFIG.turnRate;
   if (turnRight) robot.group.rotation.y -= dt * SPEED_CONFIG.turnRate;
+  if (humanoid) strafeAxis *= SPEED_CONFIG.humanoidSideStepRatio;
 
   const move = robotLocalMoveVector(forwardAxis, strafeAxis);
   let gaitTarget = 0;
@@ -4352,7 +5290,41 @@ function sceneVelocityForSpeed(realMetersPerSecond) {
 }
 
 function updateGait(realMetersPerSecond, dt) {
-  state.gaitSpeed = THREE.MathUtils.damp(state.gaitSpeed, realMetersPerSecond, 9, dt);
+  state.gaitCommandSpeed = realMetersPerSecond;
+}
+
+function updateGaitFromActualMotion(dt) {
+  if (!robot || dt <= 0) return;
+  const x = robot.group.position.x;
+  const z = robot.group.position.z;
+  const yaw = robot.group.rotation.y;
+  if (!robotMotionTracker.initialized) {
+    robotMotionTracker.initialized = true;
+    robotMotionTracker.x = x;
+    robotMotionTracker.z = z;
+    robotMotionTracker.yaw = yaw;
+    state.gaitSpeed = 0;
+    state.walk = 0;
+    return;
+  }
+
+  const sceneDistance = Math.hypot(x - robotMotionTracker.x, z - robotMotionTracker.z);
+  const yawDelta = Math.abs(angleDelta(robotMotionTracker.yaw, yaw));
+  robotMotionTracker.x = x;
+  robotMotionTracker.z = z;
+  robotMotionTracker.yaw = yaw;
+
+  const moveSpeed = sceneDistance / dt / SPEED_CONFIG.sceneScale;
+  const turnSpeed = (yawDelta / dt) * SPEED_CONFIG.turnStepRadius;
+  const measuredSpeed = Math.max(moveSpeed, turnSpeed);
+  const commandedSpeed = Math.max(0, state.gaitCommandSpeed || 0);
+  const hasActualMotion = measuredSpeed > 0.035;
+  const visualFloor = robot.variant.kind === "humanoid" && hasActualMotion
+    ? commandedSpeed * SPEED_CONFIG.humanoidVisualGaitRatio
+    : 0;
+  const targetSpeed = commandedSpeed > 0 ? Math.min(Math.max(measuredSpeed, visualFloor), commandedSpeed) : 0;
+  state.gaitActualSpeed = targetSpeed;
+  state.gaitSpeed = THREE.MathUtils.damp(state.gaitSpeed, targetSpeed, 10, dt);
   state.walk = THREE.MathUtils.clamp(state.gaitSpeed / SPEED_CONFIG.max, 0, 1);
 }
 
@@ -4455,9 +5427,48 @@ function visualGroundForFootBounds(box) {
   return ground;
 }
 
+function isUrdfContactLinkName(name, variant) {
+  const patterns = ROBOT_URDF_CONTACT_LINK_PATTERNS[variant?.kind] || [];
+  return patterns.some((pattern) => pattern.test(name));
+}
+
+function collectUrdfContactObjects(urdfModel, variant) {
+  const contactObjects = [];
+  const contactLinkNames = new Set();
+  const linkEntries = urdfModel.links ? Object.values(urdfModel.links) : [];
+  for (const link of linkEntries) {
+    const name = link?.name || link?.urdfName || "";
+    if (isUrdfContactLinkName(name, variant)) contactLinkNames.add(name);
+  }
+
+  for (const link of linkEntries) {
+    const name = link?.name || link?.urdfName || "";
+    if (!contactLinkNames.has(name)) continue;
+    let addedFromLink = false;
+    for (const child of link.children) {
+      if (!child.isURDFVisual && !child.isMesh) continue;
+      contactObjects.push(child);
+      addedFromLink = true;
+    }
+    if (!addedFromLink) contactObjects.push(link);
+  }
+
+  return contactObjects.length ? contactObjects : [urdfModel];
+}
+
+function addUrdfContactBounds(contactBounds, urdfModel) {
+  if (!urdfModel) return;
+  const contactObjects = urdfModel.userData.contactObjects || [urdfModel];
+  for (const object of contactObjects) {
+    robotUrdfVisualBounds.setFromObject(object);
+    if (!robotUrdfVisualBounds.isEmpty()) contactBounds.push(robotUrdfVisualBounds.clone());
+  }
+}
+
 function robotFootGroundState() {
   if (!robot?.parts) return;
   robot.group.updateWorldMatrix(true, true);
+  const contactBounds = [];
   let lowestFootY = Infinity;
   let lowestClearance = Infinity;
   let lowestTargetClearance = Infinity;
@@ -4469,10 +5480,16 @@ function robotFootGroundState() {
   for (const foot of robot.footMeshes()) {
     if (!foot) continue;
     robotFootBounds.setFromObject(foot);
-    const ground = visualGroundForFootBounds(robotFootBounds);
+    if (!robotFootBounds.isEmpty()) contactBounds.push(robotFootBounds.clone());
+  }
+
+  addUrdfContactBounds(contactBounds, robot.parts.urdfModel);
+
+  for (const bounds of contactBounds) {
+    const ground = visualGroundForFootBounds(bounds);
     const targetClearance = ground.y > 0 ? ROBOT_FOOT_DECOR_CLEARANCE : ROBOT_FOOT_GROUND_CLEARANCE;
-    const clearance = robotFootBounds.min.y - ground.y;
-    lowestFootY = Math.min(lowestFootY, robotFootBounds.min.y);
+    const clearance = bounds.min.y - ground.y;
+    lowestFootY = Math.min(lowestFootY, bounds.min.y);
     if (clearance < lowestClearance) {
       lowestClearance = clearance;
       lowestTargetClearance = targetClearance;
@@ -4537,32 +5554,83 @@ function syncItemsFromPhysics() {
   }
 }
 
+function robotHeadingYaw() {
+  return robot.group.rotation.y + ROBOT_FORWARD_YAW_OFFSET;
+}
+
 function robotForward() {
-  return new THREE.Vector3(-Math.sin(robot.group.rotation.y), 0, -Math.cos(robot.group.rotation.y)).normalize();
+  const yaw = robotHeadingYaw();
+  return new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)).normalize();
 }
 
 function robotRight() {
-  return new THREE.Vector3(Math.cos(robot.group.rotation.y), 0, -Math.sin(robot.group.rotation.y)).normalize();
+  const yaw = robotHeadingYaw();
+  return new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw)).normalize();
 }
 
 function yawForDirection(dir) {
-  return Math.atan2(-dir.x, -dir.z);
+  return Math.atan2(-dir.x, -dir.z) - ROBOT_FORWARD_YAW_OFFSET;
 }
 
-function facePoint(point, dt = 0.016) {
+function facePoint(point, dt = 0.016, options = {}) {
   const dir = point.clone().sub(robot.group.position);
   dir.y = 0;
   if (dir.lengthSq() < 0.0001) return;
-  robot.group.rotation.y = dampAngle(robot.group.rotation.y, yawForDirection(dir.normalize()), 12, dt);
+  const desiredYaw = yawForDirection(dir.normalize());
+  const delta = angleDelta(robot.group.rotation.y, desiredYaw);
+  const turnRate = options.turnRate ?? SPEED_CONFIG.turnRate * 1.2;
+  const minFrameStep = options.minFrameStep ?? 0.015;
+  const maxFrameStep = options.maxFrameStep ?? Infinity;
+  const maxStep = THREE.MathUtils.clamp(turnRate * dt, minFrameStep, maxFrameStep);
+  robot.group.rotation.y += THREE.MathUtils.clamp(delta, -maxStep, maxStep);
+}
+
+function queueAutoFace(point) {
+  state.pendingFaceTarget = point.clone();
+}
+
+function manualControlIntentActive() {
+  if (state.task) return true;
+  if (
+    keys.has("KeyW") || keys.has("ArrowUp") ||
+    keys.has("KeyS") || keys.has("ArrowDown") ||
+    keys.has("KeyA") || keys.has("ArrowLeft") ||
+    keys.has("KeyD") || keys.has("ArrowRight") ||
+    keys.has("KeyQ") || keys.has("KeyE")
+  ) return true;
+  for (const action of ["forward", "backward", "left", "right", "turn-left", "turn-right"]) {
+    if (controlActive(action)) return true;
+  }
+  return false;
+}
+
+function updateQueuedAutoFace(dt) {
+  if (!state.pendingFaceTarget || !state.autoFace || !state.home.entered) return;
+  if (manualControlIntentActive()) return;
+  const dir = state.pendingFaceTarget.clone().sub(robot.group.position);
+  dir.y = 0;
+  if (dir.lengthSq() < 0.0001) {
+    state.pendingFaceTarget = null;
+    return;
+  }
+  const desiredYaw = yawForDirection(dir.normalize());
+  const remaining = Math.abs(angleDelta(robot.group.rotation.y, desiredYaw));
+  facePoint(state.pendingFaceTarget, dt, AUTO_FACE_CONFIG);
+  if (remaining < AUTO_FACE_CONFIG.settleAngle) state.pendingFaceTarget = null;
+}
+
+function angleDelta(current, target) {
+  return THREE.MathUtils.euclideanModulo(target - current + Math.PI, Math.PI * 2) - Math.PI;
 }
 
 function dampAngle(current, target, lambda, dt) {
-  const delta = THREE.MathUtils.euclideanModulo(target - current + Math.PI, Math.PI * 2) - Math.PI;
+  const delta = angleDelta(current, target);
   return current + delta * (1 - Math.exp(-lambda * dt));
 }
 
 function moveRobotTo(position, yaw) {
   robotSurfaceLift = 0;
+  robotMotionTracker.initialized = false;
   physics.robotBody.position.set(position.x, ROBOT_BODY_HALF_HEIGHT, position.z);
   physics.robotBody.velocity.set(0, 0, 0);
   robot.group.rotation.y = yaw;
@@ -4662,7 +5730,7 @@ function resetScene() {
   }
   selectItem(items[0]);
   setView("overview");
-  toast("场景已重置。");
+  toast(t("toast.resetScene"));
 }
 
 function createItemButtons() {
@@ -4672,7 +5740,8 @@ function createItemButtons() {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.dataset.item = item.id;
-    btn.innerHTML = `<span class="item-dot"></span><span>${item.name}</span><span class="item-state">待命</span>`;
+    btn.innerHTML = `<span class="item-dot"></span><span class="item-name">${itemLabel(item)}</span><span class="item-state">${t("state.ready")}</span>`;
+    btn.setAttribute("aria-label", t("a11y.itemStatus", { item: itemLabel(item), state: t("state.ready") }));
     btn.querySelector(".item-dot").style.background = `#${item.color.toString(16).padStart(6, "0")}`;
     btn.addEventListener("click", () => {
       selectItem(item);
@@ -4689,7 +5758,8 @@ function createTargetButtons() {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.dataset.target = spot.name;
-    btn.innerHTML = `<span class="target-dot"></span><span>${spot.name}</span><span class="target-state">可选</span>`;
+    btn.innerHTML = `<span class="target-dot"></span><span class="target-name">${dropSpotLabel(spot)}</span><span class="target-state">${t("state.available")}</span>`;
+    btn.setAttribute("aria-label", t("a11y.targetStatus", { target: dropSpotLabel(spot), state: t("state.available") }));
     btn.addEventListener("click", () => selectDropSpot(spot.name));
     root.appendChild(btn);
   }
@@ -4698,17 +5768,42 @@ function createTargetButtons() {
 function updateUi() {
   const variant = robot?.variant || ROBOT_VARIANTS[state.robotVariant];
   const canManipulate = robotCanManipulate();
-  document.getElementById("robot-variant-name").textContent = variant.name;
-  document.getElementById("robot-profile-name").textContent = variant.profile;
-  document.getElementById("robot-source-name").textContent = ROBOT_MODEL_SOURCE;
-  document.getElementById("selected-name").textContent = state.selected ? state.selected.name : "未选择";
+  if (stage) {
+    stage.dataset.robotGaitCommandSpeed = state.gaitCommandSpeed.toFixed(3);
+    stage.dataset.robotGaitActualSpeed = state.gaitActualSpeed.toFixed(3);
+    stage.dataset.robotWalkBlend = state.walk.toFixed(3);
+    stage.dataset.robotNavClearance = robotNavClearance().toFixed(3);
+    stage.dataset.robotX = robot.group.position.x.toFixed(3);
+    stage.dataset.robotZ = robot.group.position.z.toFixed(3);
+    stage.dataset.robotYaw = robot.group.rotation.y.toFixed(3);
+    stage.dataset.robotUrdfVisible = String(!!robot?.parts.urdfModel?.visible);
+    stage.dataset.robotProceduralProxyVisible = String(robotProceduralProxyVisible());
+    const forward = robotForward();
+    const right = robotRight();
+    stage.dataset.robotForwardX = forward.x.toFixed(3);
+    stage.dataset.robotForwardZ = forward.z.toFixed(3);
+    stage.dataset.robotRightX = right.x.toFixed(3);
+    stage.dataset.robotRightZ = right.z.toFixed(3);
+    const ball = items.find((item) => item.id === "ball");
+    if (ball) {
+      stage.dataset.ballProxyVisible = String(!!ball.mesh.visible);
+      stage.dataset.ballContactShadowVisible = String(!!ball.contactShadow?.visible);
+      stage.dataset.ballLoadedModelVisible = String(!!ball.loadedModel?.visible);
+    }
+  }
+  document.getElementById("robot-variant-name").textContent = robotVariantLabel(variant);
+  document.getElementById("robot-profile-name").textContent = robotProfileLabel(variant);
+  document.getElementById("robot-source-name").textContent = robot?.urdfStatus
+    ? `${robotSourceLabel(variant)} / ${urdfStatusLabel(robot.urdfStatus)}`
+    : t("robot.modelSource");
+  document.getElementById("selected-name").textContent = state.selected ? itemLabel(state.selected) : t("state.notSelected");
   document.getElementById("held-name").textContent = heldSummary();
-  document.getElementById("active-arm-name").textContent = canManipulate ? armLabel(state.activeArm) : "无机械臂";
+  document.getElementById("active-arm-name").textContent = canManipulate ? armLabel(state.activeArm) : t("arm.none");
   document.getElementById("leg-pose-name").textContent = legPoseLabel();
-  document.getElementById("target-name").textContent = state.currentTarget ? state.currentTarget.name : "随机";
+  document.getElementById("target-name").textContent = state.currentTarget ? targetLabel(state.currentTarget) : t("state.random");
   document.getElementById("scene-style-name").textContent = sceneModeLabel(state.sceneMode);
-  document.getElementById("robot-mode").textContent = state.task ? "执行中" : anyHeld() ? "夹持" : "待命";
-  document.getElementById("task-status").textContent = state.task ? taskLabel(state.task) : "无任务";
+  document.getElementById("robot-mode").textContent = state.task ? t("state.running") : anyHeld() ? t("state.holding") : t("state.idle");
+  document.getElementById("task-status").textContent = state.task ? taskLabel(state.task) : t("state.noTask");
   document.getElementById("robot-coord").textContent =
     `${robot.group.position.x.toFixed(2)}, ${robot.group.position.z.toFixed(2)}`;
   document.getElementById("left-grip-meter").style.width = `${Math.round(state.arms.left.grip * 100)}%`;
@@ -4729,7 +5824,7 @@ function updateUi() {
   document.querySelectorAll("[data-scene-mode]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.sceneMode === state.sceneMode);
   });
-  document.querySelectorAll("[data-robot-variant]").forEach((btn) => {
+  document.querySelectorAll("#robot-variant-buttons [data-robot-variant]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.robotVariant === state.robotVariant);
   });
   document.querySelectorAll("[data-leg-action]").forEach((btn) => {
@@ -4743,42 +5838,55 @@ function updateUi() {
     btn.classList.toggle("active", active);
   });
   const sidebarToggle = document.getElementById("sidebar-toggle");
-  sidebarToggle.textContent = state.sidebarHidden ? "显示侧栏" : "隐藏侧栏";
-  sidebarToggle.title = state.sidebarHidden ? "显示侧边栏" : "隐藏侧边栏";
+  sidebarToggle.textContent = state.sidebarHidden ? t("top.showSidebar") : t("top.hideSidebar");
+  sidebarToggle.title = state.sidebarHidden ? t("top.showSidebarTitle") : t("top.hideSidebarTitle");
   sidebarToggle.classList.toggle("active", state.sidebarHidden);
+  const fullscreenToggle = document.getElementById("fullscreen-toggle");
+  fullscreenToggle.textContent = state.fullscreen ? t("top.exitFullscreen") : t("top.fullscreen");
+  fullscreenToggle.title = state.fullscreen ? t("top.exitFullscreenTitle") : t("top.enterFullscreenTitle");
+  fullscreenToggle.classList.toggle("active", state.fullscreen);
   document.querySelectorAll("#item-list button").forEach((btn) => {
     const item = items.find((candidate) => candidate.id === btn.dataset.item);
     btn.classList.toggle("active", item === state.selected);
     const stateEl = btn.querySelector(".item-state");
-    stateEl.textContent = item.heldBy ? armLabel(item.heldBy) : item.placed ? "已放置" : "待命";
+    const nameEl = btn.querySelector(".item-name");
+    const itemState = item.heldBy ? armLabel(item.heldBy) : item.placed ? t("state.placed") : t("state.ready");
+    if (nameEl) nameEl.textContent = itemLabel(item);
+    stateEl.textContent = itemState;
+    btn.setAttribute("aria-label", t("a11y.itemStatus", { item: itemLabel(item), state: itemState }));
   });
   document.querySelectorAll("#target-list button").forEach((btn) => {
     const selected = state.selectedDropSpot?.name === btn.dataset.target;
     btn.classList.toggle("active", selected);
     const stateEl = btn.querySelector(".target-state");
-    stateEl.textContent = selected ? "已选" : "可选";
+    const nameEl = btn.querySelector(".target-name");
+    const targetName = dropSpotLabel(btn.dataset.target);
+    const targetState = selected ? t("state.selected") : t("state.available");
+    if (nameEl) nameEl.textContent = targetName;
+    stateEl.textContent = targetState;
+    btn.setAttribute("aria-label", t("a11y.targetStatus", { target: targetName, state: targetState }));
   });
 }
 
 function taskLabel(task) {
   if (task.type === "grab") {
     const phase = {
-      approach: "避障接近",
-      pregrasp: "开爪对准",
-      close: "合爪夹取",
-      lift: "抬起"
-    }[task.phase] || "抓取";
-    return `${armLabel(task.arm)}${phase} ${task.item.name}`;
+      approach: t("task.approach"),
+      pregrasp: t("task.pregrasp"),
+      close: t("task.close"),
+      lift: t("task.lift")
+    }[task.phase] || t("task.grab");
+    return `${armLabel(task.arm)} ${phase} ${itemLabel(task.item)}`;
   }
-  if (task.type === "place") return `放置到 ${task.target.name}`;
-  return "执行中";
+  if (task.type === "place") return t("task.placeTo", { target: targetLabel(task.target) });
+  return t("task.running");
 }
 
 function heldSummary() {
   const entries = [];
-  if (state.held.left) entries.push(`左:${state.held.left.name}`);
-  if (state.held.right) entries.push(`右:${state.held.right.name}`);
-  return entries.length ? entries.join(" / ") : "空";
+  if (state.held.left) entries.push(`${t("arm.leftShort")}:${itemLabel(state.held.left)}`);
+  if (state.held.right) entries.push(`${t("arm.rightShort")}:${itemLabel(state.held.right)}`);
+  return entries.length ? entries.join(" / ") : t("state.none");
 }
 
 function activeHeldArm() {
@@ -4806,20 +5914,36 @@ function robotArmEnabled(arm) {
   return false;
 }
 
+function robotProceduralProxyVisible() {
+  if (!robot?.parts) return false;
+  return [
+    robot.parts.pelvis,
+    robot.parts.waist,
+    robot.parts.torso,
+    robot.parts.head,
+    robot.parts.leftArm?.shoulder,
+    robot.parts.rightArm?.shoulder,
+    robot.parts.leftLeg?.hip,
+    robot.parts.rightLeg?.hip,
+    robot.parts.quadruped?.group,
+    robot.parts.mobile?.group
+  ].some((part) => !!part?.visible);
+}
+
 function armLabel(arm) {
-  return arm === "left" ? "左臂" : "右臂";
+  return arm === "left" ? t("arm.left") : t("arm.right");
 }
 
 function sceneModeLabel(mode) {
-  return mode === "rich" ? "普通" : "简单";
+  return mode === "rich" ? t("scene.rich") : t("scene.simple");
 }
 
 function legPoseLabel() {
-  if (state.legs.leftLift > 0.1) return "左抬腿";
-  if (state.legs.rightLift > 0.1) return "右抬腿";
-  if (state.legs.crouch >= 0.7) return "深蹲";
-  if (state.legs.crouch >= 0.25) return "半蹲";
-  return "站立";
+  if (state.legs.leftLift > 0.1) return t("leg.leftStep");
+  if (state.legs.rightLift > 0.1) return t("leg.rightStep");
+  if (state.legs.crouch >= 0.7) return t("leg.deepSquat");
+  if (state.legs.crouch >= 0.25) return t("leg.halfSquat");
+  return t("leg.stand");
 }
 
 function clamp01(value) {
@@ -4841,34 +5965,37 @@ function onResize() {
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
-  composer.setSize(width, height);
-  ssaoPass.setSize(width, height);
-  bloomPass.setSize(width, height);
   labelRenderer.setSize(width, height);
 }
 
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
-  const dt = Math.min((now - lastFrameTime) / 1000, 0.04);
+  const frameDt = Math.max(0, (now - lastFrameTime) / 1000);
+  const dt = Math.min(frameDt, 0.04);
+  const transitionDt = Math.min(frameDt, 0.25);
   lastFrameTime = now;
   const time = (now - bootTime) / 1000;
 
   updateManual(dt);
   updateTask(dt);
+  updateQueuedAutoFace(dt);
   physics.world.step(1 / 60, dt, 4);
   syncRobotFromPhysics();
+  updateGaitFromActualMotion(dt);
   syncItemsFromPhysics();
   robot.update(dt, time);
   keepRobotFeetAboveFloor(dt);
   updateFollowCamera(dt);
-  updateHomeCamera(dt, time);
+  updateHomeCamera(transitionDt, time);
   updateTargetPulse(time);
   controls.update();
-  if (state.sceneMode === "rich") composer.render();
-  else renderer.render(scene, camera);
+  renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
-  updateUi();
+  if (now - lastFrameUiUpdate >= UI_FRAME_UPDATE_INTERVAL_MS) {
+    lastFrameUiUpdate = now;
+    updateUi();
+  }
 }
 
 function exposeDebugApi() {
@@ -4881,6 +6008,11 @@ function exposeDebugApi() {
           y: Number(robot.group.position.y.toFixed(3)),
           z: Number(robot.group.position.z.toFixed(3)),
           yaw: Number(robot.group.rotation.y.toFixed(3)),
+          headingYaw: Number(robotHeadingYaw().toFixed(3)),
+          forwardX: Number(robotForward().x.toFixed(3)),
+          forwardZ: Number(robotForward().z.toFixed(3)),
+          rightX: Number(robotRight().x.toFixed(3)),
+          rightZ: Number(robotRight().z.toFixed(3)),
           lowestFootY: footState ? Number(footState.lowestFootY.toFixed(3)) : null,
           footClearance: footState ? Number(footState.lowestClearance.toFixed(3)) : null,
           footTargetClearance: footState ? Number(footState.lowestTargetClearance.toFixed(3)) : null,
@@ -4888,12 +6020,32 @@ function exposeDebugApi() {
           footSurface: footState?.contactLayer || null,
           surfaceLift: Number(robotSurfaceLift.toFixed(3))
         },
+        camera: {
+          x: Number(camera.position.x.toFixed(3)),
+          y: Number(camera.position.y.toFixed(3)),
+          z: Number(camera.position.z.toFixed(3)),
+          targetX: Number(controls.target.x.toFixed(3)),
+          targetY: Number(controls.target.y.toFixed(3)),
+          targetZ: Number(controls.target.z.toFixed(3))
+        },
+        home: {
+          entered: state.home.entered,
+          entering: state.home.entering,
+          elapsed: Number(state.home.elapsed.toFixed(3)),
+          duration: Number(state.home.duration.toFixed(3)),
+          view: state.home.view
+        },
         activeArm: state.activeArm,
         sceneMode: state.sceneMode,
         robotVariant: state.robotVariant,
         robotProfile: robot.variant.profile,
         robotKind: robot.variant.kind,
-        robotSource: ROBOT_MODEL_SOURCE,
+        robotSource: robot.urdfSource,
+        robotUrdfStatus: robot.urdfStatus,
+        robotUrdfPath: robot.robotUrdfAsset().path,
+        robotUrdfJointCount: robot.parts.urdfModel ? Object.keys(robot.parts.urdfModel.joints || {}).length : 0,
+        robotUrdfVisible: !!robot.parts.urdfModel?.visible,
+        proceduralProxyVisible: robotProceduralProxyVisible(),
         armCapable: robot.variant.armCapable,
         quadrupedDetails: robot.variant.kind === "quadruped"
           ? {
@@ -4903,8 +6055,12 @@ function exposeDebugApi() {
             }
           : null,
         sidebarHidden: state.sidebarHidden,
+        fullscreen: state.fullscreen,
+        fullscreenFallback: state.fullscreenFallback,
         speedMps: Number(state.moveSpeed.toFixed(2)),
         gaitSpeedMps: Number(state.gaitSpeed.toFixed(2)),
+        gaitCommandSpeedMps: Number(state.gaitCommandSpeed.toFixed(2)),
+        gaitActualSpeedMps: Number(state.gaitActualSpeed.toFixed(2)),
         sceneVelocityScale: SPEED_CONFIG.sceneScale,
         held: {
           left: state.held.left?.name || null,
@@ -4919,9 +6075,10 @@ function exposeDebugApi() {
           ? {
               waypoint: state.task.waypoint,
               waypoints: state.task.path.length,
-              obstacles: navObstacles.length
+              obstacles: navObstacles.length,
+              clearance: Number(robotNavClearance().toFixed(2))
             }
-          : { waypoint: 0, waypoints: 0, obstacles: navObstacles.length },
+          : { waypoint: 0, waypoints: 0, obstacles: navObstacles.length, clearance: Number(robotNavClearance().toFixed(2)) },
         target: state.currentTarget
           ? {
               name: state.currentTarget.name,
@@ -4936,6 +6093,9 @@ function exposeDebugApi() {
           name: item.name,
           heldBy: item.heldBy,
           placed: item.placed,
+          proxyVisible: !!item.mesh.visible,
+          contactShadowVisible: !!item.contactShadow?.visible,
+          loadedModelVisible: !!item.loadedModel?.visible,
           x: Number(item.group.position.x.toFixed(3)),
           y: Number(item.group.position.y.toFixed(3)),
           z: Number(item.group.position.z.toFixed(3))
@@ -4958,6 +6118,7 @@ function boot() {
   robot = new Robot();
   scene.add(robot.group);
   createRobotBody();
+  robot.ensureUrdfLoaded();
   createItems();
   loadRichAssetModels();
   createItemButtons();
