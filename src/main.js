@@ -706,6 +706,64 @@ const robotMotionTracker = {
   z: 0,
   yaw: 0
 };
+const navPlannerStats = {
+  status: "idle",
+  reason: "",
+  iterations: 0,
+  expanded: 0,
+  generated: 0,
+  openMax: 0,
+  lastPathLength: 0
+};
+
+class MinPriorityQueue {
+  constructor(compare) {
+    this.compare = compare;
+    this.items = [];
+  }
+
+  get length() {
+    return this.items.length;
+  }
+
+  push(item) {
+    this.items.push(item);
+    this.bubbleUp(this.items.length - 1);
+  }
+
+  pop() {
+    if (!this.items.length) return null;
+    const top = this.items[0];
+    const tail = this.items.pop();
+    if (this.items.length && tail) {
+      this.items[0] = tail;
+      this.sinkDown(0);
+    }
+    return top;
+  }
+
+  bubbleUp(index) {
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (this.compare(this.items[parent], this.items[index]) <= 0) break;
+      [this.items[parent], this.items[index]] = [this.items[index], this.items[parent]];
+      index = parent;
+    }
+  }
+
+  sinkDown(index) {
+    while (true) {
+      const left = index * 2 + 1;
+      const right = left + 1;
+      let best = index;
+      if (left < this.items.length && this.compare(this.items[left], this.items[best]) < 0) best = left;
+      if (right < this.items.length && this.compare(this.items[right], this.items[best]) < 0) best = right;
+      if (best === index) break;
+      [this.items[index], this.items[best]] = [this.items[best], this.items[index]];
+      index = best;
+    }
+  }
+}
 
 function createRichTextures() {
   return {
@@ -5085,26 +5143,47 @@ function clearNavPath(task = null) {
 function planPath(start, goal) {
   const clampedStart = clampNavPoint(start);
   const clampedGoal = nearestFreeNavPoint(clampNavPoint(goal));
-  if (hasLineOfSight(clampedStart, clampedGoal)) return [clampedGoal];
+  resetNavPlannerStats("searching");
+  if (hasLineOfSight(clampedStart, clampedGoal)) {
+    updateNavPlannerStats({
+      status: "direct",
+      reason: "line-of-sight",
+      lastPathLength: 1
+    });
+    return [clampedGoal];
+  }
 
   const startCell = nearestFreeCell(worldToNavCell(clampedStart));
   const goalCell = nearestFreeCell(worldToNavCell(clampedGoal));
-  const open = [{ ...startCell, g: 0, f: navHeuristic(startCell, goalCell), parent: null }];
-  const best = new Map([[navCellKey(startCell.x, startCell.z), open[0]]]);
+  const startNode = { ...startCell, g: 0, f: navHeuristic(startCell, goalCell), parent: null };
+  const open = new MinPriorityQueue((a, b) => a.f - b.f || a.g - b.g);
+  open.push(startNode);
+  const best = new Map([[navCellKey(startCell.x, startCell.z), startNode]]);
   const closed = new Set();
   const maxIterations = 2400;
   const dirs = [
     [1, 0], [-1, 0], [0, 1], [0, -1],
     [1, 1], [1, -1], [-1, 1], [-1, -1]
   ];
+  navPlannerStats.openMax = 1;
 
   for (let i = 0; open.length && i < maxIterations; i += 1) {
-    open.sort((a, b) => b.f - a.f);
+    navPlannerStats.iterations = i + 1;
     const current = open.pop();
+    if (!current) break;
     const key = navCellKey(current.x, current.z);
     if (closed.has(key)) continue;
-    if (current.x === goalCell.x && current.z === goalCell.z) return smoothNavPath(reconstructNavPath(current));
+    if (current.x === goalCell.x && current.z === goalCell.z) {
+      const path = smoothNavPath(reconstructNavPath(current));
+      updateNavPlannerStats({
+        status: "planned",
+        reason: "astar",
+        lastPathLength: path.length
+      });
+      return path;
+    }
     closed.add(key);
+    navPlannerStats.expanded += 1;
 
     for (const [dx, dz] of dirs) {
       const nx = current.x + dx;
@@ -5119,10 +5198,43 @@ function planPath(start, goal) {
       const node = { x: nx, z: nz, g, f: g + navHeuristic({ x: nx, z: nz }, goalCell), parent: current };
       best.set(nextKey, node);
       open.push(node);
+      navPlannerStats.generated += 1;
+      navPlannerStats.openMax = Math.max(navPlannerStats.openMax, open.length);
     }
   }
 
+  updateNavPlannerStats({
+    status: "failed",
+    reason: open.length ? "iteration-limit" : "no-open-nodes",
+    lastPathLength: 0
+  });
   return [];
+}
+
+function resetNavPlannerStats(status = "idle") {
+  navPlannerStats.status = status;
+  navPlannerStats.reason = "";
+  navPlannerStats.iterations = 0;
+  navPlannerStats.expanded = 0;
+  navPlannerStats.generated = 0;
+  navPlannerStats.openMax = 0;
+  navPlannerStats.lastPathLength = 0;
+}
+
+function updateNavPlannerStats(patch) {
+  Object.assign(navPlannerStats, patch);
+}
+
+function navPlannerStatsSnapshot() {
+  return {
+    status: navPlannerStats.status,
+    reason: navPlannerStats.reason,
+    iterations: navPlannerStats.iterations,
+    expanded: navPlannerStats.expanded,
+    generated: navPlannerStats.generated,
+    openMax: navPlannerStats.openMax,
+    lastPathLength: navPlannerStats.lastPathLength
+  };
 }
 
 function reconstructNavPath(node) {
@@ -5809,6 +5921,10 @@ function updateUi() {
     stage.dataset.robotGaitActualSpeed = state.gaitActualSpeed.toFixed(3);
     stage.dataset.robotWalkBlend = state.walk.toFixed(3);
     stage.dataset.robotNavClearance = robotNavClearance().toFixed(3);
+    stage.dataset.robotNavPlannerStatus = navPlannerStats.status;
+    stage.dataset.robotNavPlannerReason = navPlannerStats.reason;
+    stage.dataset.robotNavPlannerIterations = String(navPlannerStats.iterations);
+    stage.dataset.robotNavPlannerPathLength = String(navPlannerStats.lastPathLength);
     stage.dataset.robotX = robot.group.position.x.toFixed(3);
     stage.dataset.robotZ = robot.group.position.z.toFixed(3);
     stage.dataset.robotYaw = robot.group.rotation.y.toFixed(3);
@@ -6112,9 +6228,16 @@ function exposeDebugApi() {
               waypoint: state.task.waypoint,
               waypoints: state.task.path.length,
               obstacles: navObstacles.length,
-              clearance: Number(robotNavClearance().toFixed(2))
+              clearance: Number(robotNavClearance().toFixed(2)),
+              planner: navPlannerStatsSnapshot()
             }
-          : { waypoint: 0, waypoints: 0, obstacles: navObstacles.length, clearance: Number(robotNavClearance().toFixed(2)) },
+          : {
+              waypoint: 0,
+              waypoints: 0,
+              obstacles: navObstacles.length,
+              clearance: Number(robotNavClearance().toFixed(2)),
+              planner: navPlannerStatsSnapshot()
+            },
         target: state.currentTarget
           ? {
               name: state.currentTarget.name,
@@ -6136,6 +6259,18 @@ function exposeDebugApi() {
           y: Number(item.group.position.y.toFixed(3)),
           z: Number(item.group.position.z.toFixed(3))
         }))
+      };
+    },
+    planPath: (start, goal) => {
+      const startPoint = new THREE.Vector3(start.x, 0, start.z);
+      const goalPoint = new THREE.Vector3(goal.x, 0, goal.z);
+      const path = planPath(startPoint, goalPoint);
+      return {
+        points: path.map((point) => ({
+          x: Number(point.x.toFixed(3)),
+          z: Number(point.z.toFixed(3))
+        })),
+        stats: navPlannerStatsSnapshot()
       };
     }
   };
