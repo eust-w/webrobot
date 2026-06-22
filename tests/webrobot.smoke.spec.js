@@ -5,16 +5,26 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("keeps the WebGL stage alive across language and robot variant changes", async ({ page }) => {
+  const richModelRequests = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url.includes("/models/polyhaven/") && url.endsWith(".gltf")) richModelRequests.push(url);
+  });
+
   await page.goto("/");
   const stage = page.locator("#stage");
 
   await expect(stage).toHaveAttribute("data-debug-api", "ready");
+  await expect(stage).toHaveAttribute("data-rich-assets-requested", "false");
+  expect(richModelRequests).toHaveLength(0);
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
   await expect(page.getByRole("button", { name: "进入实验室" })).toBeVisible();
   await expect(stage.locator("canvas")).toHaveCount(1);
 
   await page.locator("#enter-lab").evaluate((button) => button.click());
   await page.waitForFunction(() => window.webRobotDebug?.snapshot().home.entered === true);
+  await expect(stage).toHaveAttribute("data-rich-assets-requested", "true");
+  await expect.poll(() => richModelRequests.length, { timeout: 30_000 }).toBeGreaterThan(0);
   await expect(stage.locator("canvas")).toHaveCount(1);
 
   await page.evaluate(() => {

@@ -1,15 +1,16 @@
 import * as CANNON from "cannon-es";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { getLanguage, LANGUAGE_OPTIONS, setLanguage, t } from "./i18n.js";
 import "./style.css";
 
 const stage = document.getElementById("stage");
+stage.dataset.gltfLoader = "idle";
+stage.dataset.hdriReady = "idle";
+stage.dataset.roomEnvironmentReady = "idle";
+stage.dataset.richAssetsRequested = "false";
 const RENDER_PIXEL_RATIO = Math.min(window.devicePixelRatio || 1, 1.25);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(RENDER_PIXEL_RATIO);
@@ -27,17 +28,92 @@ function assetUrl(path) {
 }
 
 const textureLoader = new THREE.TextureLoader();
-const gltfLoader = new GLTFLoader();
-const hdrLoader = new HDRLoader();
-const pmremGenerator = new THREE.PMREMGenerator(renderer);
-const roomEnvironment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+let gltfLoaderPromise = null;
+let pmremGenerator = null;
+let roomEnvironment = null;
+let roomEnvironmentPromise = null;
 let glasshouseEnvironment = null;
-hdrLoader.load(assetUrl("hdris/polyhaven/glasshouse_interior/glasshouse_interior_1k.hdr"), (texture) => {
-  glasshouseEnvironment = pmremGenerator.fromEquirectangular(texture).texture;
-  texture.dispose();
-  stage.dataset.hdriReady = "true";
-  if (state.sceneMode === "rich") scene.environment = glasshouseEnvironment;
-});
+let richEnvironmentPromise = null;
+
+function getPmremGenerator() {
+  if (!pmremGenerator) pmremGenerator = new THREE.PMREMGenerator(renderer);
+  return pmremGenerator;
+}
+
+function getGltfLoader() {
+  if (!gltfLoaderPromise) {
+    stage.dataset.gltfLoader = "loading";
+    gltfLoaderPromise = import("three/addons/loaders/GLTFLoader.js")
+      .then(({ GLTFLoader }) => {
+        stage.dataset.gltfLoader = "ready";
+        return new GLTFLoader();
+      })
+      .catch((error) => {
+        stage.dataset.gltfLoader = "error";
+        gltfLoaderPromise = null;
+        throw error;
+      });
+  }
+  return gltfLoaderPromise;
+}
+
+function ensureRoomEnvironment() {
+  if (roomEnvironment) return Promise.resolve(roomEnvironment);
+  if (!roomEnvironmentPromise) {
+    stage.dataset.roomEnvironmentReady = "loading";
+    roomEnvironmentPromise = import("three/addons/environments/RoomEnvironment.js")
+      .then(({ RoomEnvironment }) => {
+        roomEnvironment = getPmremGenerator().fromScene(new RoomEnvironment(), 0.04).texture;
+        stage.dataset.roomEnvironmentReady = "true";
+        return roomEnvironment;
+      })
+      .catch((error) => {
+        stage.dataset.roomEnvironmentReady = "error";
+        roomEnvironmentPromise = null;
+        throw error;
+      });
+  }
+  return roomEnvironmentPromise;
+}
+
+function ensureRichEnvironment() {
+  if (glasshouseEnvironment) return Promise.resolve(glasshouseEnvironment);
+  if (!richEnvironmentPromise) {
+    stage.dataset.hdriReady = "loading";
+    richEnvironmentPromise = Promise.all([
+      import("three/addons/loaders/HDRLoader.js"),
+      ensureRoomEnvironment()
+    ])
+      .then(([{ HDRLoader }, fallbackEnvironment]) =>
+        new Promise((resolve) => {
+          const hdrLoader = new HDRLoader();
+          hdrLoader.load(
+            assetUrl("hdris/polyhaven/glasshouse_interior/glasshouse_interior_1k.hdr"),
+            (texture) => {
+              glasshouseEnvironment = getPmremGenerator().fromEquirectangular(texture).texture;
+              texture.dispose();
+              stage.dataset.hdriReady = "true";
+              if (state.sceneMode === "rich") scene.environment = glasshouseEnvironment;
+              resolve(glasshouseEnvironment);
+            },
+            undefined,
+            (error) => {
+              console.warn("Unable to load rich HDR environment", error);
+              stage.dataset.hdriReady = "fallback";
+              if (state.sceneMode === "rich") scene.environment = fallbackEnvironment;
+              resolve(fallbackEnvironment);
+            }
+          );
+        })
+      )
+      .catch((error) => {
+        stage.dataset.hdriReady = "error";
+        richEnvironmentPromise = null;
+        throw error;
+      });
+  }
+  return richEnvironmentPromise;
+}
 
 const labelRenderer = new CSS2DRenderer();
 labelRenderer.setSize(window.innerWidth, window.innerHeight);
@@ -1163,7 +1239,15 @@ function applySceneMode(mode, announce = false) {
   mat.glass.opacity = rich ? 0.42 : 0.34;
   mat.glass.roughness = rich ? 0.06 : 0.1;
   mat.glass.needsUpdate = true;
-  scene.environment = rich ? glasshouseEnvironment || roomEnvironment : null;
+  scene.environment = rich ? glasshouseEnvironment || roomEnvironment || null : null;
+  if (rich) {
+    ensureRichEnvironment()
+      .then((environment) => {
+        if (state.sceneMode === "rich") scene.environment = environment;
+      })
+      .catch((error) => console.warn("Unable to prepare rich environment", error));
+    if (state.home.entered) loadRichAssetModels();
+  }
   for (const object of richOnlyObjects) object.visible = rich && !object.userData.suppressed;
   for (const object of simpleOnlyObjects) object.visible = !rich;
   updateRichFurnitureFallbacks(rich);
@@ -1925,6 +2009,7 @@ function createItemBody(config) {
 }
 
 function loadRichAssetModels() {
+  stage.dataset.richAssetsRequested = "true";
   loadPottedPlantModel();
   loadCoffeeTableModel();
   loadSofaModel();
@@ -1933,12 +2018,18 @@ function loadRichAssetModels() {
   loadFootballModel();
 }
 
+function loadGltfModel(path, onLoad, onError) {
+  getGltfLoader()
+    .then((loader) => loader.load(assetUrl(path), onLoad, undefined, onError))
+    .catch(onError);
+}
+
 function loadPottedPlantModel() {
   if (richAssetModels.pottedPlant || richAssetModels.pottedPlantLoading) return;
   richAssetModels.pottedPlantLoading = true;
   stage.dataset.pottedPlantModel = "loading";
-  gltfLoader.load(
-    assetUrl("models/polyhaven/potted_plant_01/potted_plant_01_1k.gltf"),
+  loadGltfModel(
+    "models/polyhaven/potted_plant_01/potted_plant_01_1k.gltf",
     (gltf) => {
       richAssetModels.pottedPlant = gltf.scene;
       prepareLoadedRichModel(richAssetModels.pottedPlant);
@@ -1957,8 +2048,8 @@ function loadCoffeeTableModel() {
   if (richAssetModels.coffeeTable || richAssetModels.coffeeTableLoading) return;
   richAssetModels.coffeeTableLoading = true;
   stage.dataset.coffeeTableModel = "loading";
-  gltfLoader.load(
-    assetUrl("models/polyhaven/modern_coffee_table_01/modern_coffee_table_01_1k.gltf"),
+  loadGltfModel(
+    "models/polyhaven/modern_coffee_table_01/modern_coffee_table_01_1k.gltf",
     (gltf) => {
       richAssetModels.coffeeTable = gltf.scene;
       prepareLoadedRichModel(richAssetModels.coffeeTable);
@@ -1977,8 +2068,8 @@ function loadSofaModel() {
   if (richAssetModels.sofa || richAssetModels.sofaLoading) return;
   richAssetModels.sofaLoading = true;
   stage.dataset.sofaModel = "loading";
-  gltfLoader.load(
-    assetUrl("models/polyhaven/sofa_03/sofa_03_1k.gltf"),
+  loadGltfModel(
+    "models/polyhaven/sofa_03/sofa_03_1k.gltf",
     (gltf) => {
       richAssetModels.sofa = gltf.scene;
       prepareLoadedRichModel(richAssetModels.sofa);
@@ -1997,8 +2088,8 @@ function loadGamepadModel() {
   if (richAssetModels.gamepad || richAssetModels.gamepadLoading) return;
   richAssetModels.gamepadLoading = true;
   stage.dataset.gamepadModel = "loading";
-  gltfLoader.load(
-    assetUrl("models/polyhaven/gamepad/gamepad_1k.gltf"),
+  loadGltfModel(
+    "models/polyhaven/gamepad/gamepad_1k.gltf",
     (gltf) => {
       richAssetModels.gamepad = gltf.scene;
       prepareLoadedRichModel(richAssetModels.gamepad);
@@ -2017,8 +2108,8 @@ function loadBrassGobletsModel() {
   if (richAssetModels.brassGoblets || richAssetModels.brassGobletsLoading) return;
   richAssetModels.brassGobletsLoading = true;
   stage.dataset.cupModel = "loading";
-  gltfLoader.load(
-    assetUrl("models/polyhaven/brass_goblets/brass_goblets_1k.gltf"),
+  loadGltfModel(
+    "models/polyhaven/brass_goblets/brass_goblets_1k.gltf",
     (gltf) => {
       richAssetModels.brassGoblets = gltf.scene;
       prepareLoadedRichModel(richAssetModels.brassGoblets);
@@ -2037,8 +2128,8 @@ function loadFootballModel() {
   if (richAssetModels.football || richAssetModels.footballLoading) return;
   richAssetModels.footballLoading = true;
   stage.dataset.ballModel = "loading";
-  gltfLoader.load(
-    assetUrl("models/polyhaven/football/football_1k.gltf"),
+  loadGltfModel(
+    "models/polyhaven/football/football_1k.gltf",
     (gltf) => {
       richAssetModels.football = gltf.scene;
       prepareLoadedRichModel(richAssetModels.football);
@@ -4438,6 +4529,7 @@ function startExperience(mode = "simple", view = "overview") {
   controls.enabled = false;
   document.body.classList.add("home-entering");
   robot?.ensureUrdfLoaded();
+  if (state.sceneMode === "rich") loadRichAssetModels();
 }
 
 function updateHomeCamera(dt, time) {
@@ -6189,6 +6281,12 @@ function exposeDebugApi() {
         },
         activeArm: state.activeArm,
         sceneMode: state.sceneMode,
+        assets: {
+          richAssetsRequested: stage.dataset.richAssetsRequested === "true",
+          gltfLoader: stage.dataset.gltfLoader || "idle",
+          hdriReady: stage.dataset.hdriReady || "idle",
+          roomEnvironmentReady: stage.dataset.roomEnvironmentReady || "idle"
+        },
         robotVariant: state.robotVariant,
         robotProfile: robot.variant.profile,
         robotKind: robot.variant.kind,
@@ -6291,7 +6389,6 @@ function boot() {
   createRobotBody();
   robot.ensureUrdfLoaded();
   createItems();
-  loadRichAssetModels();
   createItemButtons();
   createTargetButtons();
   bindUi();
