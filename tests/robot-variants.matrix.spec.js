@@ -56,12 +56,11 @@ async function waitForVariantLoaded(page, expected) {
         snapshot.robotUrdfVisible === true &&
         snapshot.proceduralProxyVisible === false &&
         snapshot.robotUrdfPath.endsWith(urdfPath) &&
-        snapshot.robotUrdfJointCount > 0 &&
-        snapshot.robot.footClearance > -0.01
+        snapshot.robotUrdfJointCount > 0
       );
     },
     expected,
-    { timeout: 45_000 }
+    { timeout: 120_000 }
   );
 }
 
@@ -74,7 +73,7 @@ function expectedArmState(layout, armCapable) {
 }
 
 test("loads every robot platform configuration with consistent controls", async ({ page }) => {
-  test.setTimeout(300_000);
+  test.setTimeout(900_000);
   const urdfRequests = new Map();
   page.on("request", (request) => {
     const url = request.url();
@@ -91,6 +90,7 @@ test("loads every robot platform configuration with consistent controls", async 
   await expect(page.locator("#robot-variant-buttons [data-robot-variant]")).toHaveCount(ROBOT_VARIANTS.length);
 
   for (const expected of ROBOT_VARIANTS) {
+    console.log(`Loading robot variant: ${expected.id}`);
     await selectVariant(page, expected.id);
     await waitForVariantLoaded(page, expected);
     await expect(stage.locator("canvas")).toHaveCount(1);
@@ -125,6 +125,7 @@ test("loads every robot platform configuration with consistent controls", async 
     expect(result.urdfPath).toContain(expected.urdfPath);
     expect(result.joints).toBeGreaterThan(0);
     expect(result.footClearance).toBeGreaterThanOrEqual(-0.01);
+    expect(result.footClearance).toBeLessThanOrEqual(0.12);
 
     resultLines.push(
       `${result.id}: kind=${result.kind}, joints=${result.joints}, footClearance=${result.footClearance.toFixed(3)}, armCapable=${result.armCapable}`

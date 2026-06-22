@@ -618,7 +618,7 @@ const ROBOT_URDF_ASSETS = {
   },
   "go1-quadruped": {
     path: "robots/urdf/unitree/go2_description/go2_description.urdf",
-    source: "Unitree Go2 官方 URDF / 紧凑缩放",
+    source: "Unitree Go2 官方 URDF / Go1 尺寸映射",
     scale: 0.9,
     kind: "quadruped"
   },
@@ -630,19 +630,19 @@ const ROBOT_URDF_ASSETS = {
   },
   "aliengo-quadruped": {
     path: "robots/urdf/unitree/go2_description/go2_description.urdf",
-    source: "Unitree Go2 官方 URDF / 工业缩放",
+    source: "Unitree Go2 官方 URDF / Aliengo 尺寸映射",
     scale: 1.08,
     kind: "quadruped"
   },
   "b2-quadruped": {
     path: "robots/urdf/unitree/go2_description/go2_description.urdf",
-    source: "Unitree Go2 官方 URDF / 重载缩放",
+    source: "Unitree Go2 官方 URDF / B2 尺寸映射",
     scale: 1.2,
     kind: "quadruped"
   },
   "b2w-quadruped": {
     path: "robots/urdf/unitree/go2_description/go2_description.urdf",
-    source: "Unitree Go2 官方 URDF / 轮足交互映射",
+    source: "Unitree Go2 官方 URDF / B2-W 轮足交互映射",
     scale: 1.22,
     kind: "quadruped"
   },
@@ -3401,8 +3401,8 @@ class Robot {
     this.urdfPendingVariant = null;
     this.urdfStatus = "URDF 已加载";
     this.urdfSource = asset.source;
-    this.alignUrdfToControlRig(urdfRobot);
     urdfRobot.userData.contactObjects = collectUrdfContactObjects(urdfRobot, variant);
+    this.alignUrdfToControlRig(urdfRobot, variant);
     this.hideProceduralRig();
     this.syncUrdfPose(0, performance.now() * 0.001);
     const stage = document.getElementById("stage");
@@ -3433,13 +3433,34 @@ class Robot {
     updateUi();
   }
 
-  alignUrdfToControlRig(urdfRobot) {
+  alignUrdfToControlRig(urdfRobot, variant = this.variant) {
     this.group.updateWorldMatrix(true, true);
-    const controlState = robotFootGroundState();
-    if (!controlState) return;
-    robotUrdfVisualBounds.setFromObject(urdfRobot);
-    if (robotUrdfVisualBounds.isEmpty()) return;
-    urdfRobot.position.y += controlState.lowestFootY - robotUrdfVisualBounds.min.y;
+    urdfRobot.updateWorldMatrix(true, true);
+    const contactObjects = urdfRobot.userData.contactObjects || collectUrdfContactObjects(urdfRobot, variant);
+    let lowestClearance = Infinity;
+    let targetClearance = ROBOT_FOOT_GROUND_CLEARANCE;
+
+    for (const object of contactObjects) {
+      const bounds = urdfContactBoundsForObject(object, variant);
+      if (!bounds) continue;
+      const ground = visualGroundForFootBounds(bounds);
+      const target = ground.y > 0 ? ROBOT_FOOT_DECOR_CLEARANCE : ROBOT_FOOT_GROUND_CLEARANCE;
+      const clearance = bounds.min.y - ground.y;
+      if (clearance < lowestClearance) {
+        lowestClearance = clearance;
+        targetClearance = target;
+      }
+    }
+
+    if (!Number.isFinite(lowestClearance)) {
+      robotUrdfVisualBounds.setFromObject(urdfRobot);
+      if (robotUrdfVisualBounds.isEmpty()) return;
+      const ground = visualGroundForFootBounds(robotUrdfVisualBounds);
+      lowestClearance = robotUrdfVisualBounds.min.y - ground.y;
+      targetClearance = ground.y > 0 ? ROBOT_FOOT_DECOR_CLEARANCE : ROBOT_FOOT_GROUND_CLEARANCE;
+    }
+
+    urdfRobot.position.y += targetClearance - lowestClearance;
     urdfRobot.userData.stanceBaseY = urdfRobot.position.y;
     urdfRobot.updateWorldMatrix(true, true);
   }
@@ -3541,11 +3562,11 @@ class Robot {
     let targetClearance = ROBOT_FOOT_GROUND_CLEARANCE;
     const contactObjects = model.userData.contactObjects || [model];
     for (const object of contactObjects) {
-      robotUrdfVisualBounds.setFromObject(object);
-      if (robotUrdfVisualBounds.isEmpty()) continue;
-      const ground = visualGroundForFootBounds(robotUrdfVisualBounds);
+      const bounds = urdfContactBoundsForObject(object, this.variant);
+      if (!bounds) continue;
+      const ground = visualGroundForFootBounds(bounds);
       const target = ground.y > 0 ? ROBOT_FOOT_DECOR_CLEARANCE : ROBOT_FOOT_GROUND_CLEARANCE;
-      const clearance = robotUrdfVisualBounds.min.y - ground.y;
+      const clearance = bounds.min.y - ground.y;
       if (clearance < lowestClearance) {
         lowestClearance = clearance;
         targetClearance = target;
@@ -5456,12 +5477,27 @@ function collectUrdfContactObjects(urdfModel, variant) {
   return contactObjects.length ? contactObjects : [urdfModel];
 }
 
+function urdfContactBoundsForObject(object, variant) {
+  if (!object) return null;
+  robotUrdfVisualBounds.setFromObject(object);
+  if (!robotUrdfVisualBounds.isEmpty()) return robotUrdfVisualBounds.clone();
+  if (!object.isObject3D) return null;
+
+  const center = new THREE.Vector3();
+  object.getWorldPosition(center);
+  const radius = variant?.kind === "mobile" ? 0.07 : 0.035;
+  return new THREE.Box3().setFromCenterAndSize(
+    center,
+    new THREE.Vector3(radius * 2, radius * 2, radius * 2)
+  );
+}
+
 function addUrdfContactBounds(contactBounds, urdfModel) {
   if (!urdfModel) return;
   const contactObjects = urdfModel.userData.contactObjects || [urdfModel];
   for (const object of contactObjects) {
-    robotUrdfVisualBounds.setFromObject(object);
-    if (!robotUrdfVisualBounds.isEmpty()) contactBounds.push(robotUrdfVisualBounds.clone());
+    const bounds = urdfContactBoundsForObject(object, robot?.variant);
+    if (bounds) contactBounds.push(bounds);
   }
 }
 
